@@ -3813,7 +3813,14 @@ def build_leaderboard_text() -> str:
 
 
 async def leaderboard_loop(app: Application):
-    """Create/update a single Top-10 leaderboard message in the trending channel."""
+    """Create/update a single Top-10 leaderboard message in the trending channel.
+
+    Anti-spam rules:
+      - Prefer editing an existing message_id (from state file).
+      - If state is missing (e.g. after restart), reuse the pinned leaderboard message if present.
+      - Only send a new message when we are sure the old one doesn't exist / can't be edited.
+      - Never send a new message just because edit failed for a transient reason (rate limits, bad request, etc).
+    """
     if not (LEADERBOARD_ON and TRENDING_POST_CHAT_ID):
         return
     try:
@@ -3821,41 +3828,68 @@ async def leaderboard_loop(app: Application):
     except Exception:
         return
 
-    state = _load_leaderboard_msg_state()
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("Ton Listing", url=LISTING_URL)]])
     key = str(channel_id)
-    msg_id = None
-    try:
-        msg_id = int(state.get(key) or 0) or None
-    except Exception:
-        msg_id = None
-
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Ton Listing", url=LISTING_URL)]
-    ])
 
     while True:
+        # Always reload state so restarts / multiple deploys converge on a single message.
+        state = _load_leaderboard_msg_state()
+        msg_id: Optional[int] = None
         try:
-            text = build_leaderboard_text()
-            if msg_id:
-                try:
-                    await app.bot.edit_message_text(
-                        chat_id=channel_id,
-                        message_id=msg_id,
-                        text=text,
-                        parse_mode="HTML",
-                        disable_web_page_preview=True,
-                        reply_markup=kb,
-                    )
-                except Exception as e:
-                    # Don't recreate on "message is not modified" (otherwise it will spam new messages).
-                    emsg = str(e).lower()
-                    if "message is not modified" in emsg:
-                        pass
-                    else:
-                        # message missing/too old/not editable → recreate
-                        msg_id = None
+            msg_id = int(state.get(key) or 0) or None
+        except Exception:
+            msg_id = None
 
-            if not msg_id:
+        # If we don't have a stored msg_id (common after redeploy on ephemeral FS),
+        # try to reuse the pinned leaderboard message in the channel.
+        if not msg_id:
+            try:
+                chat = await app.bot.get_chat(channel_id)
+                pm = getattr(chat, "pinned_message", None)
+                pm_text = (getattr(pm, "text", None) or getattr(pm, "caption", None) or "") if pm else ""
+                if pm and "SPYTON TRENDING" in pm_text:
+                    msg_id = int(pm.message_id)
+                    state[key] = msg_id
+                    _save_leaderboard_msg_state(state)
+            except Exception:
+                pass
+
+        text = build_leaderboard_text()
+
+        # 1) Try edit
+        if msg_id:
+            try:
+                await app.bot.edit_message_text(
+                    chat_id=channel_id,
+                    message_id=msg_id,
+                    text=text,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                    reply_markup=kb,
+                )
+            except Exception as e:
+                emsg = str(e).lower()
+
+                # Ignore harmless errors (do not recreate!)
+                if "message is not modified" in emsg:
+                    pass
+                elif "flood" in emsg or "too many requests" in emsg:
+                    pass
+                # Only recreate when we're sure the message can't be edited / doesn't exist
+                elif ("message to edit not found" in emsg) or ("message can't be edited" in emsg) or ("message_id_invalid" in emsg):
+                    try:
+                        state.pop(key, None)
+                        _save_leaderboard_msg_state(state)
+                    except Exception:
+                        pass
+                    msg_id = None
+                else:
+                    # Unknown/transient error: keep msg_id and do NOT spam a new message
+                    log.warning("leaderboard edit failed (kept msg_id): %s", e)
+
+        # 2) Send if needed
+        if not msg_id:
+            try:
                 m = await app.bot.send_message(
                     chat_id=channel_id,
                     text=text,
@@ -3871,8 +3905,8 @@ async def leaderboard_loop(app: Application):
                     await app.bot.pin_chat_message(chat_id=channel_id, message_id=msg_id, disable_notification=True)
                 except Exception:
                     pass
-        except Exception as e:
-            log.debug("leaderboard loop error: %s", e)
+            except Exception as e:
+                log.warning("leaderboard send failed: %s", e)
 
         await asyncio.sleep(LEADERBOARD_INTERVAL)
 
