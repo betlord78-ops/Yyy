@@ -3432,7 +3432,7 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
             return f"{float(x):,.4f}"
         return f"{float(x):,.6f}"
 
-    # -------------------- SpyTON premium buy card (HTML) --------------------
+    # -------------------- SpyTON premium buy cards (HTML) --------------------
     def h(s: Any) -> str:
         return html.escape(str(s or ""))
 
@@ -3544,63 +3544,149 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
     ad_text, ad_link, _left = active_ad()
     ad_line = f"ad: <a href=\"{h(ad_link)}\">{h(ad_text)}</a>" if ad_link else f"ad: {h(ad_text)}"
 
-    # Assemble message
-    header_text = f"{h(title)} Buy!"
-    if header_link:
-        header_text = f"<a href=\"{h(header_link)}\"><b>{header_text}</b></a>"
-    else:
-        header_text = f"<b>{header_text}</b>"
+    def build_group_message() -> str:
+        """Compact group style like the reference (Spent/Got + Price/Liq/MCap/Holders)."""
+        header_text = f"<b>{h(title)} Buy!</b>"
+        blocks: List[str] = [header_text]
+        if strength_html:
+            blocks.append(strength_html)
+        blocks.append("")
+        blocks.append(f"Spent: <b>{ton_amt:,.2f} TON</b>")
+        if tok_amt and tok_symbol:
+            try:
+                tok_amt_f = float(tok_amt)
+                blocks.append(f"Got: <b>{h(fmt_token_amount(tok_amt_f))} {h(tok_symbol)}</b>")
+            except Exception:
+                blocks.append(f"Got: <b>{h(tok_amt)} {h(tok_symbol)}</b>")
+        blocks.append("")
+        # Buyer + Txn (no New Holder label in group style)
+        buyer_line2 = buyer_html
+        if buyer_url:
+            buyer_line2 = f'<a href="{h(buyer_url)}">{buyer_html}</a>'
+        if tx_url:
+            buyer_line2 = f"{buyer_line2} | <a href=\"{h(tx_url)}\">Txn</a>"
+        blocks.append(buyer_line2)
+        blocks.append("")
 
-    blocks: List[str] = [header_text]
-    if strength_html:
-        blocks.append(strength_html)
-    blocks.append("")
-    blocks.append(f"💰 <b>{ton_amt:,.2f} TON</b>{h(usd_disp)}")
-    if got_line:
-        blocks.append(got_line)
-    blocks.append(f"👤 {buyer_line}")
-    blocks.append("")
-    for ln in [mc_line, liq_line, holders_line]:
-        if ln:
-            blocks.append(ln)
-    blocks.append("")
-    if listing_line:
-        blocks.append(listing_line)
-    blocks.append(links_line)
-    blocks.append("")
-    blocks.append(ad_line)
+        # Market stats
+        if price_usd is not None:
+            blocks.append(f"Price: {h(fmt_usd(price_usd, 6) or '—')}")
+        if liq_usd is not None:
+            blocks.append(f"Liquidity: {h(fmt_usd(liq_usd, 0) or '—')}")
+        if mc_usd is not None:
+            blocks.append(f"MCap: {h(fmt_usd(mc_usd, 0) or '—')}")
+        if holders is not None:
+            blocks.append(f"Holders: {h(f'{int(holders):,}')}")
+        # Inline text links row like the reference: TX | GT | DexS | Telegram | Trending
+        link_parts = []
+        if tx_url:
+            link_parts.append(f"<a href=\"{h(tx_url)}\">TX</a>")
+        if gt_url:
+            link_parts.append(f"<a href=\"{h(gt_url)}\">GT</a>")
+        if dex_url:
+            link_parts.append(f"<a href=\"{h(dex_url)}\">DexS</a>")
+        if tg_link:
+            link_parts.append(f"<a href=\"{h(tg_link)}\">Telegram</a>")
+        if trending:
+            link_parts.append(f"<a href=\"{h(trending)}\">Trending</a>")
+        if link_parts:
+            blocks.append(" | ".join(link_parts))
 
-    msg = "\n".join(blocks)
+        blocks.append("")
+        blocks.append(ad_line)
+        return "\n".join([b for b in blocks if b is not None])
+
+    def build_trending_channel_message() -> str:
+        """Trending channel style (starts with '{TOKEN} Buy!' and no extra header)."""
+        # Header (match requested style: start with Token Buy!)
+        header = f"<b>{h(title)} Buy!</b>"
+        blocks: List[str] = [header]
+        if strength_html:
+            blocks.append("")
+            blocks.append(strength_html)
+        blocks.append("")
+        blocks.append(f"💎 <b>{ton_amt:,.2f} TON</b>{h(usd_disp)}")
+        if got_line:
+            blocks.append(got_line.replace("🪙", "🪙"))
+
+        # Buyer line with New Holder label
+        buyer_line3 = buyer_html
+        if buyer_url:
+            buyer_line3 = f'<a href="{h(buyer_url)}">{buyer_html}</a>'
+        if tx_url:
+            if is_new_buyer:
+                buyer_line3 = f"{buyer_line3}: <b>New Holder!</b> | <a href=\"{h(tx_url)}\">Txn</a>"
+            else:
+                buyer_line3 = f"{buyer_line3} | <a href=\"{h(tx_url)}\">Txn</a>"
+        blocks.append("")
+        blocks.append(f"👤 {buyer_line3}")
+
+        # Stats order (Holders, Liquidity, MCap) like the reference image
+        blocks.append("")
+        if holders is not None:
+            blocks.append(f"👥 Holders: {h(f'{int(holders):,}')}")
+        if liq_usd is not None:
+            # Use K formatting when big to match screenshot feel
+            try:
+                lv = float(liq_usd)
+                liq_disp = f"${lv/1000:,.2f}K" if lv >= 1000 else f"${lv:,.0f}"
+            except Exception:
+                liq_disp = fmt_usd(liq_usd, 0) or "—"
+            blocks.append(f"💧 Liquidity: {h(liq_disp)}")
+        if mc_usd is not None:
+            try:
+                mv = float(mc_usd)
+                m_disp = f"${mv/1_000_000:,.2f}M" if mv >= 1_000_000 else (f"${mv/1000:,.2f}K" if mv >= 1000 else f"${mv:,.0f}")
+            except Exception:
+                m_disp = fmt_usd(mc_usd, 0) or "—"
+            blocks.append(f"📊 MCap: {h(m_disp)}")
+
+        blocks.append("")
+        # Links row (Chart | Trending | DTrade) — no COC in channel style
+        chart_part_ch = f"📈 <a href=\"{h(chart_link)}\">Chart</a>" if chart_link else "📈 Chart"
+        trending_part_ch = f"🔥 <a href=\"{h(trending)}\">Trending</a>" if trending else "🔥 Trending"
+        dtrade_part_ch = dtrade_part
+        blocks.append(" | ".join([p for p in [chart_part_ch, trending_part_ch, dtrade_part_ch] if p]))
+        blocks.append(ad_line)
+        return "\n".join([b for b in blocks if b is not None])
+
+    def is_trending_dest(dest_chat_id: int) -> bool:
+        return bool(TRENDING_POST_CHAT_ID and str(dest_chat_id) == str(TRENDING_POST_CHAT_ID))
+
+    # Default message used for the original chat send
+    msg = build_trending_channel_message() if is_trending_dest(int(chat_id)) else build_group_message()
 
     # If buy image enabled and a Telegram file_id is set, send a photo with caption.
     buy_file_id = (s.get("buy_image_file_id") or "").strip()
     use_image = bool(s.get("buy_image_on", False)) and bool(buy_file_id)
 
     # Buttons:
-    # - Groups: Buy button
+    # - Groups: compact utility row + Buy with dTrade
     # - Trending channel: Book Trending ONLY
     def build_buy_keyboard(dest_chat_id: int) -> InlineKeyboardMarkup:
-        # Book trending button goes only on the official trending channel posts
-        if TRENDING_POST_CHAT_ID and str(dest_chat_id) == str(TRENDING_POST_CHAT_ID):
-            book_btn = InlineKeyboardButton("⚡ Book Trending", url=BOOK_TRENDING_URL)
+        if is_trending_dest(int(dest_chat_id)):
+            book_btn = InlineKeyboardButton("Book Trending", url=BOOK_TRENDING_URL)
             return InlineKeyboardMarkup([[book_btn]])
-        buy_btn = InlineKeyboardButton("🛒 Buy", url=buy_url)
+
+        # Groups: one clean Buy button (text links are in message body)
+        buy_btn = InlineKeyboardButton(f"Buy {tok_symbol or title} with dTrade", url=buy_url)
         return InlineKeyboardMarkup([[buy_btn]])
 
     async def _send(dest_chat_id: int):
         kb = build_buy_keyboard(int(dest_chat_id))
+        local_msg = build_trending_channel_message() if is_trending_dest(int(dest_chat_id)) else build_group_message()
         if use_image:
             await app.bot.send_photo(
                 chat_id=dest_chat_id,
                 photo=buy_file_id,
-                caption=msg,
+                caption=local_msg,
                 parse_mode="HTML",
                 reply_markup=kb,
             )
         else:
             await app.bot.send_message(
                 chat_id=dest_chat_id,
-                text=msg,
+                text=local_msg,
                 parse_mode="HTML",
                 disable_web_page_preview=True,
                 reply_markup=kb,
@@ -3715,9 +3801,14 @@ async def leaderboard_loop(app: Application):
                         disable_web_page_preview=True,
                         reply_markup=kb,
                     )
-                except Exception:
-                    # message missing/too old/not editable → recreate
-                    msg_id = None
+                except Exception as e:
+                    # Don't recreate on "message is not modified" (otherwise it will spam new messages).
+                    emsg = str(e).lower()
+                    if "message is not modified" in emsg:
+                        pass
+                    else:
+                        # message missing/too old/not editable → recreate
+                        msg_id = None
 
             if not msg_id:
                 m = await app.bot.send_message(
