@@ -55,6 +55,10 @@ GECKO_BASE = os.getenv("GECKO_BASE", "https://api.geckoterminal.com/api/v2").str
 DATA_FILE = os.getenv("GROUPS_FILE", "groups_public.json")
 SEEN_FILE = os.getenv("SEEN_FILE", "seen_public.json")
 
+# Owner-added tokens that are tracked globally (posted in the trending channel even if no group added the bot).
+# Stored by jetton master address.
+GLOBAL_TOKENS_FILE = os.getenv("GLOBAL_TOKENS_FILE", "tokens_public.json")
+
 # Dexscreener endpoints (used to resolve pool<->token)
 DEX_TOKEN_URL = os.getenv("DEX_TOKEN_URL", "https://api.dexscreener.com/latest/dex/tokens").rstrip("/")
 DEX_PAIR_URL = os.getenv("DEX_PAIR_URL", "https://api.dexscreener.com/latest/dex/pairs").rstrip("/")
@@ -529,6 +533,9 @@ def _save_json(path: str, obj):
 GROUPS: Dict[str, Any] = _load_json(DATA_FILE, {})  # chat_id -> config
 SEEN: Dict[str, Any] = _load_json(SEEN_FILE, {})    # chat_id -> {dedupe_key: ts}
 
+# Global tokens tracked for the trending channel (owner-only /addtoken)
+GLOBAL_TOKENS: Dict[str, Any] = _load_json(GLOBAL_TOKENS_FILE, {})  # jetton_addr -> token dict
+
 # Global paid ad (shown under every buy in all chats)
 ADS_STATE: Dict[str, Any] = _load_json(ADS_FILE, {"active_until": 0, "text": "", "link": ""})
 
@@ -578,7 +585,12 @@ def get_group(chat_id: int) -> Dict[str, Any]:
     return g
 
 def save_groups():
+    # Save groups and also persist GLOBAL_TOKENS so polling state (cursors/baselines) is not lost.
     _save_json(DATA_FILE, GROUPS)
+    try:
+        _save_json(GLOBAL_TOKENS_FILE, GLOBAL_TOKENS)
+    except Exception:
+        pass
 
 def save_seen():
     _save_json(SEEN_FILE, SEEN)
@@ -632,12 +644,15 @@ def record_buy_for_leaderboard(token: Dict[str, Any], ton_amount: float):
         sym = str(token.get("symbol") or "").strip() or "TOKEN"
         name = str(token.get("name") or "").strip() or sym
         window_sec = int(LEADERBOARD_WINDOW_HOURS) * 3600
+        tg = str(token.get("telegram") or "").strip()
         bucket = LEADERBOARD_STATS.get(jetton)
         if not isinstance(bucket, dict):
-            bucket = {"symbol": sym, "name": name, "events": []}
+            bucket = {"symbol": sym, "name": name, "telegram": tg, "events": []}
             LEADERBOARD_STATS[jetton] = bucket
         bucket["symbol"] = sym
         bucket["name"] = name
+        if tg:
+            bucket["telegram"] = tg
         events = bucket.get("events")
         if not isinstance(events, list):
             events = []
@@ -1672,6 +1687,165 @@ async def adstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{text}\n{link}\n"
         f"Time left: {hrs}h {mins}m"
     )
+
+
+# -------------------- OWNER-ONLY: /addtoken (global tracking) --------------------
+def _infer_dex_mode_from_text(t: str) -> str:
+    tl = (t or "").lower()
+    if "stonfi" in tl or "ston" in tl:
+        if "dedust" in tl:
+            return "both"
+        return "stonfi"
+    if "dedust" in tl:
+        return "dedust"
+    return "both"
+
+def _extract_symbol_hint(rest: str) -> str:
+    # pick the first sane token-like word as symbol (optional)
+    for w in re.split(r"\s+", (rest or "").strip()):
+        ww = re.sub(r"[^A-Za-z0-9]", "", w or "")
+        if not ww:
+            continue
+        if 1 <= len(ww) <= 12:
+            return ww.upper()
+    return ""
+
+async def addtoken_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner-only: /addtoken <CA/link> [SYMBOL] [telegram_link]
+
+    Adds a token to GLOBAL_TOKENS so buys are tracked and posted in the trending channel even
+    if no project added the bot to their group.
+    """
+    if not update.message or not update.effective_user:
+        return
+    user = update.effective_user
+    if not is_owner(user.id):
+        return
+
+    raw = (update.message.text or "").strip()
+    args_text = " ".join(context.args or []).strip()
+    if not args_text:
+        await update.message.reply_text(
+            "Usage:\n"
+            "/addtoken <TOKEN_CA or pool/link> [SYMBOL] [https://t.me/YourToken]\n\n"
+            "Example:\n"
+            "/addtoken EQ... TFT https://t.me/SpyTonTrending"
+        )
+        return
+
+    dex_mode = _infer_dex_mode_from_text(raw)
+
+    # Resolve jetton address from CA or supported links
+    jetton = await _to_thread(resolve_jetton_from_text_sync, args_text)
+    if not jetton:
+        await update.message.reply_text("Could not detect a token address. Paste the jetton CA or a supported pool link.")
+        return
+
+    # Optional TG link
+    tg_url = ""
+    m_tg = re.search(r"https?://t\.me/[A-Za-z0-9_]{3,}(?:\S*)?", args_text)
+    if m_tg:
+        tg_url = m_tg.group(0).strip()
+
+    # Optional symbol hint
+    rest = re.sub(re.escape(jetton), "", args_text)
+    rest = re.sub(r"https?://t\.me/\S+", "", rest)
+    sym_hint = _extract_symbol_hint(rest)
+
+    # Build token record (reuse the same logic as group setup)
+    gk = gecko_token_info(jetton)
+    name = (gk.get("name") or "").strip() if gk else ""
+    sym = (gk.get("symbol") or "").strip() if gk else ""
+    if not name and not sym:
+        info = tonapi_jetton_info(jetton)
+        name = (info.get("name") or "").strip()
+        sym = (info.get("symbol") or "").strip()
+    if not name and not sym:
+        dx = dex_token_info(jetton)
+        name = (dx.get("name") or "").strip()
+        sym = (dx.get("symbol") or "").strip()
+    if sym_hint:
+        sym = sym_hint
+
+    # Seed holders and decimals
+    holders_seed: Optional[int] = None
+    try:
+        info_h = tonapi_jetton_info(jetton)
+        hh = info_h.get("holders_count")
+        if hh is not None:
+            holders_seed = int(hh)
+    except Exception:
+        pass
+    if holders_seed is None:
+        try:
+            hh2 = tonapi_jetton_holders_count(jetton)
+            if hh2 is not None:
+                holders_seed = int(hh2)
+        except Exception:
+            pass
+    decimals_seed: int = 9
+    try:
+        meta_j = get_jetton_meta(jetton)
+        decimals_seed = int(meta_j.get("decimals") or 9)
+    except Exception:
+        decimals_seed = 9
+
+    dm = (dex_mode or "both").lower().strip()
+    ston_pool = find_stonfi_ton_pair_for_token(jetton) if dm in ("both", "ston", "stonfi") else None
+    dedust_pool = find_dedust_ton_pair_for_token(jetton) if dm in ("both", "dedust") else None
+
+    # Store token for global tracking
+    tok = {
+        "_scope": "global",
+        "address": jetton,
+        "dex_mode": ("auto" if dm == "both" else dm),
+        "name": name,
+        "symbol": sym,
+        "decimals": int(decimals_seed) if str(decimals_seed).isdigit() else 9,
+        "holders": holders_seed,
+        "ston_pool": ston_pool,
+        "dedust_pool": dedust_pool,
+        "set_at": int(time.time()),
+        "init_done": True,
+        "paused": False,
+        "last_ston_tx": None,
+        "last_dedust_trade": None,
+        "ston_last_block": None,
+        "ignore_before_ts": int(time.time()),
+        "burst": {"window_start": int(time.time()), "count": 0},
+        "telegram": tg_url.strip() if tg_url else "",
+    }
+    GLOBAL_TOKENS[str(jetton)] = tok
+    save_groups()  # also saves GLOBAL_TOKENS
+
+    # Warmup seen in the TRENDING channel so old swaps aren't spammed
+    if TRENDING_POST_CHAT_ID:
+        try:
+            await warmup_seen_for_chat(int(TRENDING_POST_CHAT_ID), ston_pool, dedust_pool)
+        except Exception:
+            pass
+
+    # Confirmation message like the screenshot
+    dex_label = "both"
+    if ston_pool and not dedust_pool:
+        dex_label = "stonfi"
+    elif dedust_pool and not ston_pool:
+        dex_label = "dedust"
+    elif ston_pool and dedust_pool:
+        dex_label = "stonfi + dedust"
+
+    disp = (sym or name or "TOKEN").strip()
+    lines = [
+        f"✅ Added {disp}",
+        f"DEX: {dex_label}",
+        f"Token:\n{jetton}",
+    ]
+    if ston_pool or dedust_pool:
+        lines.append(f"Pair/Pool: {ston_pool or dedust_pool}")
+    if tg_url:
+        lines.append(f"Telegram: {tg_url}")
+    lines.append("\nNotes:\n• Buys will post in the trending channel even if the project didn't add the bot to their group.")
+    await update.message.reply_text("\n".join(lines), disable_web_page_preview=True)
 
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -2744,6 +2918,18 @@ async def poll_once(app: Application):
             continue
         items.append((int(k), g))
 
+    # Also poll globally tracked tokens (owner-only /addtoken) into the trending channel
+    if TRENDING_POST_CHAT_ID:
+        try:
+            tchat = int(str(TRENDING_POST_CHAT_ID))
+            for _jetton, tok in (GLOBAL_TOKENS or {}).items():
+                if not isinstance(tok, dict):
+                    continue
+                # pseudo-group config
+                items.append((tchat, {"token": tok, "settings": dict(DEFAULT_SETTINGS)}))
+        except Exception:
+            pass
+
     # For each group, poll its pools
     for chat_id, g in items:
         token = g["token"]
@@ -3113,45 +3299,53 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
     dedust_pool = token.get("dedust_pool") or ""
     pool_for_market = ston_pool or dedust_pool
 
-    # Market data (prefer GeckoTerminal)
-    price_usd = liq_usd = mc_usd = None
+    # Jetton address (used for holders + market cache keys)
+    jetton_addr = str(token.get("address") or "").strip()
+
+    # Market data (prefer GeckoTerminal). Keep last known stats so
+    # Liquidity/MCap don't randomly disappear when an API call fails.
+    def _to_float(x):
+        try:
+            return float(x)
+        except Exception:
+            return None
+
+    price_usd = _to_float(token.get("price_usd"))
+    liq_usd = _to_float(token.get("liq_usd"))
+    mc_usd = _to_float(token.get("mc_usd"))
     # Try cache first to avoid missing stats (rate limits / temporary failures)
     market_cache_key = str(pool_for_market or jetton_addr or "").strip()
     _mcached = MARKET_CACHE.get(market_cache_key) if market_cache_key else None
     _now = int(time.time())
     if _mcached and _now - int(_mcached.get("ts") or 0) < 900:
-        price_usd = _mcached.get("price_usd")
-        liq_usd = _mcached.get("liq_usd")
-        mc_usd = _mcached.get("mc_usd")
+        # Merge cache (do not overwrite known values with None)
+        price_usd = _to_float(_mcached.get("price_usd")) if _mcached.get("price_usd") is not None else price_usd
+        liq_usd = _to_float(_mcached.get("liq_usd")) if _mcached.get("liq_usd") is not None else liq_usd
+        mc_usd = _to_float(_mcached.get("mc_usd")) if _mcached.get("mc_usd") is not None else mc_usd
     if pool_for_market:
         pinfo = gecko_pool_info(pool_for_market)
         if pinfo:
-            try:
-                price_usd = float(pinfo.get("price_usd")) if pinfo.get("price_usd") is not None else None
-            except Exception:
-                price_usd = None
-            try:
-                liq_usd = float(pinfo.get("liquidity_usd")) if pinfo.get("liquidity_usd") is not None else None
-            except Exception:
-                liq_usd = None
-            try:
-                mc_usd = float(pinfo.get("market_cap_usd")) if pinfo.get("market_cap_usd") is not None else None
-            except Exception:
-                mc_usd = None
+            pv = _to_float(pinfo.get("price_usd"))
+            if pv is not None:
+                price_usd = pv
+            lv = _to_float(pinfo.get("liquidity_usd"))
+            if lv is not None:
+                liq_usd = lv
+            mv = _to_float(pinfo.get("market_cap_usd"))
+            if mv is not None:
+                mc_usd = mv
 
     if (price_usd is None or mc_usd is None) and token.get("address"):
         tinfo = gecko_token_info(token["address"])
         if tinfo:
             if price_usd is None:
-                try:
-                    price_usd = float(tinfo.get("price_usd")) if tinfo.get("price_usd") is not None else None
-                except Exception:
-                    pass
+                pv = _to_float(tinfo.get("price_usd"))
+                if pv is not None:
+                    price_usd = pv
             if mc_usd is None:
-                try:
-                    mc_usd = float(tinfo.get("market_cap_usd")) if tinfo.get("market_cap_usd") is not None else None
-                except Exception:
-                    pass
+                mv = _to_float(tinfo.get("market_cap_usd"))
+                if mv is not None:
+                    mc_usd = mv
 
     # Holders (keep last known value if APIs fail)
     holders = None
@@ -3161,7 +3355,6 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
     except Exception:
         holders = None
 
-    jetton_addr = str(token.get("address") or "").strip()
     if jetton_addr:
         # TonAPI Jetton info sometimes includes holders_count. If not, fall back
         # to the dedicated holders endpoint.
@@ -3187,14 +3380,24 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
         except Exception:
             pass
 
-    # Store/refresh cache so later messages don't lose stats
+    # Persist last known market stats (best-effort)
+    if price_usd is not None:
+        token["price_usd"] = float(price_usd)
+    if liq_usd is not None:
+        token["liq_usd"] = float(liq_usd)
+    if mc_usd is not None:
+        token["mc_usd"] = float(mc_usd)
+
+    # Store/refresh cache so later messages don't lose stats. Merge to avoid
+    # overwriting non-null values with nulls.
     if market_cache_key:
+        prev = MARKET_CACHE.get(market_cache_key) or {}
         MARKET_CACHE[market_cache_key] = {
             "ts": int(time.time()),
-            "price_usd": price_usd,
-            "liq_usd": liq_usd,
-            "mc_usd": mc_usd,
-            "holders": holders,
+            "price_usd": price_usd if price_usd is not None else prev.get("price_usd"),
+            "liq_usd": liq_usd if liq_usd is not None else prev.get("liq_usd"),
+            "mc_usd": mc_usd if mc_usd is not None else prev.get("mc_usd"),
+            "holders": holders if holders is not None else prev.get("holders"),
         }
 
     # Links row
@@ -3249,7 +3452,7 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
             return f"{float(x):,.4f}"
         return f"{float(x):,.6f}"
 
-    # -------------------- SpyTON premium buy card (HTML) --------------------
+    # -------------------- SpyTON premium buy cards (HTML) --------------------
     def h(s: Any) -> str:
         return html.escape(str(s or ""))
 
@@ -3320,11 +3523,15 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
     # Token amount formatting
     got_line = ""
     if tok_amt and tok_symbol:
+        # Make token symbol clickable to token Telegram link (if provided)
+        sym_html = h(tok_symbol)
+        if tg_link:
+            sym_html = f'<a href="{h(tg_link)}">{h(tok_symbol)}</a>'
         try:
             tok_amt_f = float(tok_amt)
-            got_line = f"🪙 <b>{h(fmt_token_amount(tok_amt_f))} {h(tok_symbol)}</b>"
+            got_line = f"🪙 <b>{h(fmt_token_amount(tok_amt_f))} {sym_html}</b>"
         except Exception:
-            got_line = f"🪙 <b>{h(tok_amt)} {h(tok_symbol)}</b>"
+            got_line = f"🪙 <b>{h(tok_amt)} {sym_html}</b>"
 
     # Stats (match screenshot order: MarketCap, Liquidity, Holders)
     mc_line = f"📊 MarketCap: {h(fmt_usd(mc_usd, 0) or '—')}" if bool(s.get("show_mcap", True)) else ""
@@ -3342,9 +3549,12 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
     chart_link = chart_url
     chart_part = f"📈 <a href=\"{h(chart_link)}\">Chart</a>" if chart_link else "📈 Chart"
     trending_part = f"🔥 <a href=\"{h(trending)}\">Trending</a>" if trending else "🔥 Trending"
+    # DTrade deep link: use referral base + append token CA.
+    # We URL-encode CA to avoid issues with special chars.
+    from urllib.parse import quote as _urlquote
     ref = (DTRADE_REF or "https://t.me/dtrade?start=11TYq7LInG").rstrip("_")
-    ca = token.get("address") or ""
-    buy_url = f"{ref}_{ca}" if ca else ref
+    ca = (token.get("address") or "").strip()
+    buy_url = f"{ref}_{_urlquote(ca, safe='')}" if ca else ref
     dtrade_part = f"🛒 <a href=\"{h(buy_url)}\">DTrade</a>" if buy_url else "🛒 DTrade"
     coc_part = f"💬 <a href=\"{h(tg_link)}\">COC</a>" if tg_link else ""
 
@@ -3358,65 +3568,166 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
     ad_text, ad_link, _left = active_ad()
     ad_line = f"ad: <a href=\"{h(ad_link)}\">{h(ad_text)}</a>" if ad_link else f"ad: {h(ad_text)}"
 
-    # Assemble message
-    header_text = f"{h(title)} Buy!"
-    if header_link:
-        header_text = f"<a href=\"{h(header_link)}\"><b>{header_text}</b></a>"
-    else:
-        header_text = f"<b>{header_text}</b>"
+    def build_group_message() -> str:
+        """Compact group style like the reference (Spent/Got + Price/Liq/MCap/Holders)."""
+        # Make token title clickable to its Telegram link when available
+        if tg_link:
+            header_text = f"<b><a href=\"{h(tg_link)}\">{h(title)}</a> Buy!</b>"
+        elif chart_link:
+            header_text = f"<b><a href=\"{h(chart_link)}\">{h(title)}</a> Buy!</b>"
+        else:
+            header_text = f"<b>{h(title)} Buy!</b>"
+        blocks: List[str] = [header_text]
+        if strength_html:
+            blocks.append(strength_html)
+        blocks.append("")
+        blocks.append(f"Spent: <b>{ton_amt:,.2f} TON</b>")
+        if tok_amt and tok_symbol:
+            try:
+                tok_amt_f = float(tok_amt)
+                blocks.append(f"Got: <b>{h(fmt_token_amount(tok_amt_f))} {h(tok_symbol)}</b>")
+            except Exception:
+                blocks.append(f"Got: <b>{h(tok_amt)} {h(tok_symbol)}</b>")
+        blocks.append("")
+        # Buyer + Txn (no New Holder label in group style)
+        buyer_line2 = buyer_html
+        if buyer_url:
+            buyer_line2 = f'<a href="{h(buyer_url)}">{buyer_html}</a>'
+        if tx_url:
+            buyer_line2 = f"{buyer_line2} | <a href=\"{h(tx_url)}\">Txn</a>"
+        blocks.append(buyer_line2)
+        blocks.append("")
 
-    blocks: List[str] = [header_text]
-    if strength_html:
-        blocks.append(strength_html)
-    blocks.append("")
-    blocks.append(f"💰 <b>{ton_amt:,.2f} TON</b>{h(usd_disp)}")
-    if got_line:
-        blocks.append(got_line)
-    blocks.append(f"👤 {buyer_line}")
-    blocks.append("")
-    for ln in [mc_line, liq_line, holders_line]:
-        if ln:
-            blocks.append(ln)
-    blocks.append("")
-    if listing_line:
-        blocks.append(listing_line)
-    blocks.append(links_line)
-    blocks.append("")
-    blocks.append(ad_line)
+        # Market stats (always show the rows; use last-known or '—')
+        blocks.append(f"Price: {h(fmt_usd(price_usd, 6) or '—')}")
+        blocks.append(f"Liquidity: {h(fmt_usd(liq_usd, 0) or '—')}")
+        blocks.append(f"MCap: {h(fmt_usd(mc_usd, 0) or '—')}")
+        blocks.append(f"Holders: {h(f'{int(holders):,}' if holders is not None else '—')}")
+        # Inline text links row like the reference: TX | GT | DexS | Telegram | Trending
+        link_parts = []
+        if tx_url:
+            link_parts.append(f"<a href=\"{h(tx_url)}\">TX</a>")
+        if gt_url:
+            link_parts.append(f"<a href=\"{h(gt_url)}\">GT</a>")
+        if dex_url:
+            link_parts.append(f"<a href=\"{h(dex_url)}\">DexS</a>")
+        if tg_link:
+            link_parts.append(f"<a href=\"{h(tg_link)}\">Telegram</a>")
+        if trending:
+            link_parts.append(f"<a href=\"{h(trending)}\">Trending</a>")
+        if link_parts:
+            blocks.append(" | ".join(link_parts))
 
-    msg = "\n".join(blocks)
+        blocks.append("")
+        blocks.append(ad_line)
+        return "\n".join([b for b in blocks if b is not None])
+
+    def build_trending_channel_message() -> str:
+        """Trending channel style (starts with '{TOKEN} Buy!' and no extra header)."""
+        # Header (match requested style: start with Token Buy!)
+        # Header: pipe + token symbol as blue link (matches reference)
+        header_token = tok_symbol or title
+        # Token symbol should be clickable to the token Telegram link (if provided)
+        if tg_link:
+            header = f'| <a href="{h(tg_link)}"><b>{h(header_token)}</b></a> Buy!'
+        elif chart_link:
+            header = f'| <a href="{h(chart_link)}"><b>{h(header_token)}</b></a> Buy!'
+        else:
+            header = f'| <b>{h(header_token)}</b> Buy!'
+        blocks: List[str] = [header]
+        if strength_html:
+            blocks.append("")
+            blocks.append(strength_html)
+        blocks.append("")
+        blocks.append(f"💎 <b>{ton_amt:,.2f} TON</b>{h(usd_disp)}")
+        if got_line:
+            blocks.append(got_line.replace("🪙", "🪙"))
+
+        # Buyer line with New Holder label
+        buyer_line3 = buyer_html
+        if buyer_url:
+            buyer_line3 = f'<a href="{h(buyer_url)}">{buyer_html}</a>'
+        if tx_url:
+            if is_new_buyer:
+                buyer_line3 = f"{buyer_line3}: <b>New Holder!</b> | <a href=\"{h(tx_url)}\">Txn</a>"
+            else:
+                buyer_line3 = f"{buyer_line3} | <a href=\"{h(tx_url)}\">Txn</a>"
+        blocks.append("")
+        blocks.append(f"👤 {buyer_line3}")
+
+        # Stats order (Holders, Liquidity, MCap) like the reference image
+        blocks.append("")
+        blocks.append(f"👥 Holders: {h(f'{int(holders):,}' if holders is not None else '—')}")
+
+        # Liquidity (show placeholder instead of dropping the line)
+        if liq_usd is not None:
+            try:
+                lv = float(liq_usd)
+                liq_disp = f"${lv/1000:,.2f}K" if lv >= 1000 else f"${lv:,.0f}"
+            except Exception:
+                liq_disp = fmt_usd(liq_usd, 0) or "—"
+        else:
+            liq_disp = "—"
+        blocks.append(f"💧 Liquidity: {h(liq_disp)}")
+
+        # MarketCap (show placeholder instead of dropping the line)
+        if mc_usd is not None:
+            try:
+                mv = float(mc_usd)
+                m_disp = f"${mv/1_000_000:,.2f}M" if mv >= 1_000_000 else (f"${mv/1000:,.2f}K" if mv >= 1000 else f"${mv:,.0f}")
+            except Exception:
+                m_disp = fmt_usd(mc_usd, 0) or "—"
+        else:
+            m_disp = "—"
+        blocks.append(f"📊 MCap: {h(m_disp)}")
+
+        blocks.append("")
+        # Links row (Chart | Trending | DTrade) — no COC in channel style
+        chart_part_ch = f"📈 <a href=\"{h(chart_link)}\">Chart</a>" if chart_link else "📈 Chart"
+        trending_part_ch = f"🔥 <a href=\"{h(trending)}\">Trending</a>" if trending else "🔥 Trending"
+        dtrade_part_ch = dtrade_part
+        blocks.append(" | ".join([p for p in [chart_part_ch, trending_part_ch, dtrade_part_ch] if p]))
+        blocks.append(ad_line)
+        return "\n".join([b for b in blocks if b is not None])
+
+    def is_trending_dest(dest_chat_id: int) -> bool:
+        return bool(TRENDING_POST_CHAT_ID and str(dest_chat_id) == str(TRENDING_POST_CHAT_ID))
+
+    # Default message used for the original chat send
+    msg = build_trending_channel_message() if is_trending_dest(int(chat_id)) else build_group_message()
 
     # If buy image enabled and a Telegram file_id is set, send a photo with caption.
     buy_file_id = (s.get("buy_image_file_id") or "").strip()
     use_image = bool(s.get("buy_image_on", False)) and bool(buy_file_id)
 
     # Buttons:
-    # - Groups: Buy button
-    # - Trending channel: Buy + Book Trending
+    # - Groups: compact utility row + Buy with dTrade
+    # - Trending channel: Book Trending ONLY
     def build_buy_keyboard(dest_chat_id: int) -> InlineKeyboardMarkup:
-        buy_btn = InlineKeyboardButton("🛒 Buy", url=buy_url)
-        # Book trending button goes only on the official trending channel posts
-        if TRENDING_POST_CHAT_ID and str(dest_chat_id) == str(TRENDING_POST_CHAT_ID):
-            book_url = "https://t.me/SpyTONTrndBot"
-            book_btn = InlineKeyboardButton("⚡ Book Trending", url=book_url)
-            return InlineKeyboardMarkup([[buy_btn, book_btn]])
+        if is_trending_dest(int(dest_chat_id)):
+            book_btn = InlineKeyboardButton("Book Trending", url=BOOK_TRENDING_URL)
+            return InlineKeyboardMarkup([[book_btn]])
+
+        # Groups: one clean Buy button (text links are in message body)
+        buy_btn = InlineKeyboardButton(f"Buy {tok_symbol or title} with dTrade", url=buy_url)
         return InlineKeyboardMarkup([[buy_btn]])
 
     async def _send(dest_chat_id: int):
         kb = build_buy_keyboard(int(dest_chat_id))
+        local_msg = build_trending_channel_message() if is_trending_dest(int(dest_chat_id)) else build_group_message()
         # Never send group buy image into the trending channel.
         if use_image and (not is_trending_dest(int(dest_chat_id))):
             await app.bot.send_photo(
                 chat_id=dest_chat_id,
                 photo=buy_file_id,
-                caption=msg,
+                caption=local_msg,
                 parse_mode="HTML",
                 reply_markup=kb,
             )
         else:
             await app.bot.send_message(
                 chat_id=dest_chat_id,
-                text=msg,
+                text=local_msg,
                 parse_mode="HTML",
                 disable_web_page_preview=True,
                 reply_markup=kb,
@@ -3466,7 +3777,8 @@ def build_leaderboard_text() -> str:
         bucket["events"] = pruned
         vol = sum(float(e[1]) for e in pruned if isinstance(e, list) and len(e) >= 2)
         sym = str(bucket.get("symbol") or "TOKEN").strip()
-        items.append((vol, sym))
+        tg = str(bucket.get("telegram") or "").strip()
+        items.append((vol, sym, tg))
 
     # keep stats tidy
     try:
@@ -3479,16 +3791,20 @@ def build_leaderboard_text() -> str:
 
     # Header
     lines: List[str] = []
-    lines.append(f"🟢 <b>SPYTON TRENDING</b> 💠")
+    # Header (keep it simple as requested)
+    lines.append(f"🟢 <b>SPYTON TRENDING</b>")
     lines.append("")
 
     rank_badges = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
     if not top:
         lines.append("No data yet — waiting for buys…")
     else:
-        for i, (vol, sym) in enumerate(top):
+        for i, (vol, sym, tg) in enumerate(top):
             badge = rank_badges[i] if i < len(rank_badges) else f"{i+1}."
-            lines.append(f"{badge} {h(sym)} | {_humanize_num(vol)} | 0%")
+            sym_html = h(sym)
+            if tg:
+                sym_html = f'<a href="{h(tg)}">{sym_html}</a>'
+            lines.append(f"{badge} {sym_html} | {_humanize_num(vol)} | 0%")
 
     lines.append("")
     # Quote footer (Telegram HTML supports <blockquote>)
@@ -3530,9 +3846,14 @@ async def leaderboard_loop(app: Application):
                         disable_web_page_preview=True,
                         reply_markup=kb,
                     )
-                except Exception:
-                    # message missing/too old/not editable → recreate
-                    msg_id = None
+                except Exception as e:
+                    # Don't recreate on "message is not modified" (otherwise it will spam new messages).
+                    emsg = str(e).lower()
+                    if "message is not modified" in emsg:
+                        pass
+                    else:
+                        # message missing/too old/not editable → recreate
+                        msg_id = None
 
             if not msg_id:
                 m = await app.bot.send_message(
@@ -3611,6 +3932,7 @@ def main():
     application = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
 
     application.add_handler(CommandHandler("start", start_cmd))
+    application.add_handler(CommandHandler("addtoken", addtoken_cmd))
     application.add_handler(CommandHandler("adset", adset_cmd))
     application.add_handler(CommandHandler("adclear", adclear_cmd))
     application.add_handler(CommandHandler("adstatus", adstatus_cmd))
