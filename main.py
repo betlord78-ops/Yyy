@@ -3503,11 +3503,15 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
     # Token amount formatting
     got_line = ""
     if tok_amt and tok_symbol:
+        # Make token symbol clickable to token Telegram link (if provided)
+        sym_html = h(tok_symbol)
+        if tg_link:
+            sym_html = f'<a href="{h(tg_link)}">{h(tok_symbol)}</a>'
         try:
             tok_amt_f = float(tok_amt)
-            got_line = f"🪙 <b>{h(fmt_token_amount(tok_amt_f))} {h(tok_symbol)}</b>"
+            got_line = f"🪙 <b>{h(fmt_token_amount(tok_amt_f))} {sym_html}</b>"
         except Exception:
-            got_line = f"🪙 <b>{h(tok_amt)} {h(tok_symbol)}</b>"
+            got_line = f"🪙 <b>{h(tok_amt)} {sym_html}</b>"
 
     # Stats (match screenshot order: MarketCap, Liquidity, Holders)
     mc_line = f"📊 MarketCap: {h(fmt_usd(mc_usd, 0) or '—')}" if bool(s.get("show_mcap", True)) else ""
@@ -3599,7 +3603,15 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
     def build_trending_channel_message() -> str:
         """Trending channel style (starts with '{TOKEN} Buy!' and no extra header)."""
         # Header (match requested style: start with Token Buy!)
-        header = f"<b>{h(title)} Buy!</b>"
+        # Header: pipe + token symbol as blue link (matches reference)
+        header_token = tok_symbol or title
+        # Token symbol should be clickable to the token Telegram link (if provided)
+        if tg_link:
+            header = f'| <a href="{h(tg_link)}"><b>{h(header_token)}</b></a> Buy!'
+        elif chart_link:
+            header = f'| <a href="{h(chart_link)}"><b>{h(header_token)}</b></a> Buy!'
+        else:
+            header = f'| <b>{h(header_token)}</b> Buy!'
         blocks: List[str] = [header]
         if strength_html:
             blocks.append("")
@@ -3675,7 +3687,8 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
     async def _send(dest_chat_id: int):
         kb = build_buy_keyboard(int(dest_chat_id))
         local_msg = build_trending_channel_message() if is_trending_dest(int(dest_chat_id)) else build_group_message()
-        if use_image:
+        # Never send group buy image into the trending channel.
+        if use_image and (not is_trending_dest(int(dest_chat_id))):
             await app.bot.send_photo(
                 chat_id=dest_chat_id,
                 photo=buy_file_id,
