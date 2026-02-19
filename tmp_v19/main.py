@@ -3404,7 +3404,8 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
 
     async def _send(dest_chat_id: int):
         kb = build_buy_keyboard(int(dest_chat_id))
-        if use_image:
+        # Never send group buy image into the trending channel.
+        if use_image and (not is_trending_dest(int(dest_chat_id))):
             await app.bot.send_photo(
                 chat_id=dest_chat_id,
                 photo=buy_file_id,
