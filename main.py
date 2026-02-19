@@ -644,12 +644,15 @@ def record_buy_for_leaderboard(token: Dict[str, Any], ton_amount: float):
         sym = str(token.get("symbol") or "").strip() or "TOKEN"
         name = str(token.get("name") or "").strip() or sym
         window_sec = int(LEADERBOARD_WINDOW_HOURS) * 3600
+        tg = str(token.get("telegram") or "").strip()
         bucket = LEADERBOARD_STATS.get(jetton)
         if not isinstance(bucket, dict):
-            bucket = {"symbol": sym, "name": name, "events": []}
+            bucket = {"symbol": sym, "name": name, "telegram": tg, "events": []}
             LEADERBOARD_STATS[jetton] = bucket
         bucket["symbol"] = sym
         bucket["name"] = name
+        if tg:
+            bucket["telegram"] = tg
         events = bucket.get("events")
         if not isinstance(events, list):
             events = []
@@ -3296,45 +3299,53 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
     dedust_pool = token.get("dedust_pool") or ""
     pool_for_market = ston_pool or dedust_pool
 
-    # Market data (prefer GeckoTerminal)
-    price_usd = liq_usd = mc_usd = None
+    # Jetton address (used for holders + market cache keys)
+    jetton_addr = str(token.get("address") or "").strip()
+
+    # Market data (prefer GeckoTerminal). Keep last known stats so
+    # Liquidity/MCap don't randomly disappear when an API call fails.
+    def _to_float(x):
+        try:
+            return float(x)
+        except Exception:
+            return None
+
+    price_usd = _to_float(token.get("price_usd"))
+    liq_usd = _to_float(token.get("liq_usd"))
+    mc_usd = _to_float(token.get("mc_usd"))
     # Try cache first to avoid missing stats (rate limits / temporary failures)
     market_cache_key = str(pool_for_market or jetton_addr or "").strip()
     _mcached = MARKET_CACHE.get(market_cache_key) if market_cache_key else None
     _now = int(time.time())
     if _mcached and _now - int(_mcached.get("ts") or 0) < 900:
-        price_usd = _mcached.get("price_usd")
-        liq_usd = _mcached.get("liq_usd")
-        mc_usd = _mcached.get("mc_usd")
+        # Merge cache (do not overwrite known values with None)
+        price_usd = _to_float(_mcached.get("price_usd")) if _mcached.get("price_usd") is not None else price_usd
+        liq_usd = _to_float(_mcached.get("liq_usd")) if _mcached.get("liq_usd") is not None else liq_usd
+        mc_usd = _to_float(_mcached.get("mc_usd")) if _mcached.get("mc_usd") is not None else mc_usd
     if pool_for_market:
         pinfo = gecko_pool_info(pool_for_market)
         if pinfo:
-            try:
-                price_usd = float(pinfo.get("price_usd")) if pinfo.get("price_usd") is not None else None
-            except Exception:
-                price_usd = None
-            try:
-                liq_usd = float(pinfo.get("liquidity_usd")) if pinfo.get("liquidity_usd") is not None else None
-            except Exception:
-                liq_usd = None
-            try:
-                mc_usd = float(pinfo.get("market_cap_usd")) if pinfo.get("market_cap_usd") is not None else None
-            except Exception:
-                mc_usd = None
+            pv = _to_float(pinfo.get("price_usd"))
+            if pv is not None:
+                price_usd = pv
+            lv = _to_float(pinfo.get("liquidity_usd"))
+            if lv is not None:
+                liq_usd = lv
+            mv = _to_float(pinfo.get("market_cap_usd"))
+            if mv is not None:
+                mc_usd = mv
 
     if (price_usd is None or mc_usd is None) and token.get("address"):
         tinfo = gecko_token_info(token["address"])
         if tinfo:
             if price_usd is None:
-                try:
-                    price_usd = float(tinfo.get("price_usd")) if tinfo.get("price_usd") is not None else None
-                except Exception:
-                    pass
+                pv = _to_float(tinfo.get("price_usd"))
+                if pv is not None:
+                    price_usd = pv
             if mc_usd is None:
-                try:
-                    mc_usd = float(tinfo.get("market_cap_usd")) if tinfo.get("market_cap_usd") is not None else None
-                except Exception:
-                    pass
+                mv = _to_float(tinfo.get("market_cap_usd"))
+                if mv is not None:
+                    mc_usd = mv
 
     # Holders (keep last known value if APIs fail)
     holders = None
@@ -3344,7 +3355,6 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
     except Exception:
         holders = None
 
-    jetton_addr = str(token.get("address") or "").strip()
     if jetton_addr:
         # TonAPI Jetton info sometimes includes holders_count. If not, fall back
         # to the dedicated holders endpoint.
@@ -3370,14 +3380,24 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
         except Exception:
             pass
 
-    # Store/refresh cache so later messages don't lose stats
+    # Persist last known market stats (best-effort)
+    if price_usd is not None:
+        token["price_usd"] = float(price_usd)
+    if liq_usd is not None:
+        token["liq_usd"] = float(liq_usd)
+    if mc_usd is not None:
+        token["mc_usd"] = float(mc_usd)
+
+    # Store/refresh cache so later messages don't lose stats. Merge to avoid
+    # overwriting non-null values with nulls.
     if market_cache_key:
+        prev = MARKET_CACHE.get(market_cache_key) or {}
         MARKET_CACHE[market_cache_key] = {
             "ts": int(time.time()),
-            "price_usd": price_usd,
-            "liq_usd": liq_usd,
-            "mc_usd": mc_usd,
-            "holders": holders,
+            "price_usd": price_usd if price_usd is not None else prev.get("price_usd"),
+            "liq_usd": liq_usd if liq_usd is not None else prev.get("liq_usd"),
+            "mc_usd": mc_usd if mc_usd is not None else prev.get("mc_usd"),
+            "holders": holders if holders is not None else prev.get("holders"),
         }
 
     # Links row
@@ -3550,7 +3570,13 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
 
     def build_group_message() -> str:
         """Compact group style like the reference (Spent/Got + Price/Liq/MCap/Holders)."""
-        header_text = f"<b>{h(title)} Buy!</b>"
+        # Make token title clickable to its Telegram link when available
+        if tg_link:
+            header_text = f"<b><a href=\"{h(tg_link)}\">{h(title)}</a> Buy!</b>"
+        elif chart_link:
+            header_text = f"<b><a href=\"{h(chart_link)}\">{h(title)}</a> Buy!</b>"
+        else:
+            header_text = f"<b>{h(title)} Buy!</b>"
         blocks: List[str] = [header_text]
         if strength_html:
             blocks.append(strength_html)
@@ -3572,15 +3598,11 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
         blocks.append(buyer_line2)
         blocks.append("")
 
-        # Market stats
-        if price_usd is not None:
-            blocks.append(f"Price: {h(fmt_usd(price_usd, 6) or '—')}")
-        if liq_usd is not None:
-            blocks.append(f"Liquidity: {h(fmt_usd(liq_usd, 0) or '—')}")
-        if mc_usd is not None:
-            blocks.append(f"MCap: {h(fmt_usd(mc_usd, 0) or '—')}")
-        if holders is not None:
-            blocks.append(f"Holders: {h(f'{int(holders):,}')}")
+        # Market stats (always show the rows; use last-known or '—')
+        blocks.append(f"Price: {h(fmt_usd(price_usd, 6) or '—')}")
+        blocks.append(f"Liquidity: {h(fmt_usd(liq_usd, 0) or '—')}")
+        blocks.append(f"MCap: {h(fmt_usd(mc_usd, 0) or '—')}")
+        blocks.append(f"Holders: {h(f'{int(holders):,}' if holders is not None else '—')}")
         # Inline text links row like the reference: TX | GT | DexS | Telegram | Trending
         link_parts = []
         if tx_url:
@@ -3635,23 +3657,29 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
 
         # Stats order (Holders, Liquidity, MCap) like the reference image
         blocks.append("")
-        if holders is not None:
-            blocks.append(f"👥 Holders: {h(f'{int(holders):,}')}")
+        blocks.append(f"👥 Holders: {h(f'{int(holders):,}' if holders is not None else '—')}")
+
+        # Liquidity (show placeholder instead of dropping the line)
         if liq_usd is not None:
-            # Use K formatting when big to match screenshot feel
             try:
                 lv = float(liq_usd)
                 liq_disp = f"${lv/1000:,.2f}K" if lv >= 1000 else f"${lv:,.0f}"
             except Exception:
                 liq_disp = fmt_usd(liq_usd, 0) or "—"
-            blocks.append(f"💧 Liquidity: {h(liq_disp)}")
+        else:
+            liq_disp = "—"
+        blocks.append(f"💧 Liquidity: {h(liq_disp)}")
+
+        # MarketCap (show placeholder instead of dropping the line)
         if mc_usd is not None:
             try:
                 mv = float(mc_usd)
                 m_disp = f"${mv/1_000_000:,.2f}M" if mv >= 1_000_000 else (f"${mv/1000:,.2f}K" if mv >= 1000 else f"${mv:,.0f}")
             except Exception:
                 m_disp = fmt_usd(mc_usd, 0) or "—"
-            blocks.append(f"📊 MCap: {h(m_disp)}")
+        else:
+            m_disp = "—"
+        blocks.append(f"📊 MCap: {h(m_disp)}")
 
         blocks.append("")
         # Links row (Chart | Trending | DTrade) — no COC in channel style
@@ -3749,7 +3777,8 @@ def build_leaderboard_text() -> str:
         bucket["events"] = pruned
         vol = sum(float(e[1]) for e in pruned if isinstance(e, list) and len(e) >= 2)
         sym = str(bucket.get("symbol") or "TOKEN").strip()
-        items.append((vol, sym))
+        tg = str(bucket.get("telegram") or "").strip()
+        items.append((vol, sym, tg))
 
     # keep stats tidy
     try:
@@ -3770,9 +3799,12 @@ def build_leaderboard_text() -> str:
     if not top:
         lines.append("No data yet — waiting for buys…")
     else:
-        for i, (vol, sym) in enumerate(top):
+        for i, (vol, sym, tg) in enumerate(top):
             badge = rank_badges[i] if i < len(rank_badges) else f"{i+1}."
-            lines.append(f"{badge} {h(sym)} | {_humanize_num(vol)} | 0%")
+            sym_html = h(sym)
+            if tg:
+                sym_html = f'<a href="{h(tg)}">{sym_html}</a>'
+            lines.append(f"{badge} {sym_html} | {_humanize_num(vol)} | 0%")
 
     lines.append("")
     # Quote footer (Telegram HTML supports <blockquote>)
