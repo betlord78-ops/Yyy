@@ -4080,7 +4080,7 @@ def build_leaderboard_text() -> str:
             pct = (cur_vol - prev_vol) / prev_vol * 100.0
 
         if cur_vol > 0 or prev_vol > 0:
-            items.append((cur_vol, sym, pct))
+            items.append((cur_vol, sym, pct, stats.get("telegram") or "", ca))
 
     items.sort(key=lambda x: x[0], reverse=True)
     top = items[:10]
@@ -4096,6 +4096,28 @@ def build_leaderboard_text() -> str:
         if p > 0:
             s = "+" + s
         return s
+    def _sym_link(sym: str, tg: str, ca: str) -> str:
+        """Return clickable HTML for symbol if we have a telegram/link."""
+        sym_h = h(sym)
+        tg = (tg or "").strip()
+        ca = (ca or "").strip()
+        if not tg:
+            if ca:
+                url = "https://tonviewer.com/jetton/" + ca
+                return f"<a href=\"{h(url)}\"><b>{sym_h}</b></a>"
+            return f"<b>{sym_h}</b>"
+        url = tg
+        if tg.startswith("@"):
+            url = "https://t.me/" + tg[1:]
+        elif tg.startswith("t.me/"):
+            url = "https://" + tg
+        elif tg.startswith("telegram.me/"):
+            url = "https://" + tg
+        elif tg.startswith("http://") or tg.startswith("https://"):
+            url = tg
+        else:
+            return f"<b>{sym_h}</b>"
+        return f"<a href=\"{h(url)}\"><b>{sym_h}</b></a>"
 
     out: List[str] = []
     out.append("TON TRENDING")
@@ -4107,9 +4129,9 @@ def build_leaderboard_text() -> str:
     if not top:
         out.append("No data yet — waiting for buys…")
     else:
-        for i, (_vol, sym, pct) in enumerate(top):
+        for i, (_vol, sym, pct, tg, ca) in enumerate(top):
             badge = rank_badges[i] if i < len(rank_badges) else f"{i+1}."
-            out.append(f"{badge} - <b>{h(sym)}</b> | {fmt_pct(pct)}")
+            out.append(f"{badge} - {_sym_link(sym, tg, ca)} | {fmt_pct(pct)}")
             if i == 2 and len(top) > 3:
                 out.append("---------------------------------------------")
 
