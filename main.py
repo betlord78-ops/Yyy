@@ -53,6 +53,7 @@ LEADERBOARD_COMPARE_WINDOW_HOURS = max(1, int(float(os.getenv("LEADERBOARD_COMPA
 LEADERBOARD_STATS_FILE = _data_path(os.getenv("LEADERBOARD_STATS_FILE", "leaderboard_stats.json"))
 LEADERBOARD_MSG_FILE = _data_path(os.getenv("LEADERBOARD_MSG_FILE", "leaderboard_msg.json"))
 BOOK_TRENDING_URL = os.getenv("BOOK_TRENDING_URL", "https://t.me/SpyTONTrndBot").strip()
+LEADERBOARD_HEADER_HANDLE = os.getenv("LEADERBOARD_HEADER_HANDLE", "@Spytontrending").strip()
 LEADERBOARD_MESSAGE_ID_STR = os.getenv("LEADERBOARD_MESSAGE_ID", "").strip()  # e.g. 25145
 LEADERBOARD_CHAT_ID_STR = os.getenv("LEADERBOARD_CHAT_ID", "").strip()  # optional; defaults to TRENDING_POST_CHAT_ID
 
@@ -3594,13 +3595,54 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
         except Exception:
             pass
 
-    # Persist last known market stats (best-effort)
-    if price_usd is not None:
-        token["price_usd"] = float(price_usd)
-    if liq_usd is not None:
-        token["liq_usd"] = float(liq_usd)
-    if mc_usd is not None:
-        token["mc_usd"] = float(mc_usd)
+    # Persist last known market stats (best-effort) - do NOT store 0/invalid values
+    try:
+        if price_usd is not None and float(price_usd) > 0:
+            token["price_usd"] = float(price_usd)
+    except Exception:
+        pass
+    try:
+        if liq_usd is not None and float(liq_usd) > 0:
+            token["liq_usd"] = float(liq_usd)
+    except Exception:
+        pass
+    try:
+        if mc_usd is not None and float(mc_usd) > 0:
+            token["mc_usd"] = float(mc_usd)
+    except Exception:
+        pass
+    # Normalize market stats: treat 0/invalid as missing so we never show $0
+
+    try:
+
+        if price_usd is not None and float(price_usd) <= 0:
+
+            price_usd = None
+
+    except Exception:
+
+        price_usd = None
+
+    try:
+
+        if liq_usd is not None and float(liq_usd) <= 0:
+
+            liq_usd = None
+
+    except Exception:
+
+        liq_usd = None
+
+    try:
+
+        if mc_usd is not None and float(mc_usd) <= 0:
+
+            mc_usd = None
+
+    except Exception:
+
+        mc_usd = None
+
 
     # Store/refresh cache so later messages don't lose stats. Merge to avoid
     # overwriting non-null values with nulls.
@@ -3748,8 +3790,17 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
             got_line = f"🪙 <b>{h(tok_amt)} {sym_html}</b>"
 
     # Stats (match screenshot order: MarketCap, Liquidity, Holders)
-    mc_line = f"📊 MarketCap: {h(fmt_usd(mc_usd, 0) or '—')}" if bool(s.get("show_mcap", True)) else ""
-    liq_line = f"💧 Liquidity {h(fmt_usd(liq_usd, 0) or '—')}" if bool(s.get("show_liquidity", True)) else ""
+    def _pos_or_none(v):
+        try:
+            if v is None:
+                return None
+            fv = float(v)
+            return fv if fv > 0 else None
+        except Exception:
+            return None
+
+    mc_line = f"📊 MarketCap: {h(fmt_usd(_pos_or_none(mc_usd), 0) or '—')}" if bool(s.get("show_mcap", True)) else ""
+    liq_line = f"💧 Liquidity {h(fmt_usd(_pos_or_none(liq_usd), 0) or '—')}" if bool(s.get("show_liquidity", True)) else ""
     holders_line = ""
     if bool(s.get("show_holders", True)):
         hval = f"{holders:,}" if isinstance(holders, int) else (str(holders) if holders is not None else "—")
@@ -3813,9 +3864,21 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
         blocks.append("")
 
         # Market stats (always show the rows; use last-known or '—')
-        blocks.append(f"Price: {h(fmt_usd(price_usd, 6) or '—')}")
-        blocks.append(f"Liquidity: {h(fmt_usd(liq_usd, 0) or '—')}")
-        blocks.append(f"MCap: {h(fmt_usd(mc_usd, 0) or '—')}")
+        def _pos_or_none(v):
+            try:
+                if v is None:
+                    return None
+                fv = float(v)
+                return fv if fv > 0 else None
+            except Exception:
+                return None
+
+        price_disp = fmt_usd(_pos_or_none(price_usd), 6) or "—"
+        liq_disp = fmt_usd(_pos_or_none(liq_usd), 0) or "—"
+        mc_disp = fmt_usd(_pos_or_none(mc_usd), 0) or "—"
+        blocks.append(f"Price: {h(price_disp)}")
+        blocks.append(f"Liquidity: {h(liq_disp)}")
+        blocks.append(f"MCap: {h(mc_disp)}")
         blocks.append(f"Holders: {h(f'{int(holders):,}' if holders is not None else '—')}")
         # Inline text links row like the reference: TX | GT | DexS | Telegram | Trending
         link_parts = []
@@ -3974,63 +4037,59 @@ async def tracker_loop(app: Application):
 
 # -------------------- Trending Leaderboard (Top-10) --------------------
 def build_leaderboard_text() -> str:
-    """Build an organic Top-10 leaderboard message (HTML) similar to the reference style.
+    """Build a Top-10 leaderboard message (HTML) matching your screenshot style.
 
-    - Ranks by TON buy volume over the last LEADERBOARD_WINDOW_HOURS (default 6h).
-    - The % column compares current window vs the previous compare window
-      (LEADERBOARD_COMPARE_WINDOW_HOURS; default equals window).
-    - Does NOT display volume/amounts (matches screenshot style).
+    - Ranks by TON buy volume over the last LEADERBOARD_WINDOW_HOURS.
+    - Shows % change vs previous compare window (LEADERBOARD_COMPARE_WINDOW_HOURS).
     """
     def h(s: Any) -> str:
         return html.escape(str(s or ""))
 
     now = int(time.time())
-    window_sec = int(LEADERBOARD_WINDOW_HOURS * 3600)
+    win_sec = int(LEADERBOARD_WINDOW_HOURS * 3600)
+    prev_sec = int(LEADERBOARD_COMPARE_WINDOW_HOURS * 3600)
 
-    # Rank tokens by **current MarketCap** and show % change vs the first MC snapshot in the last 6 hours.
-    items = []  # (current_mc_usd, sym, telegram_link, pct_change)
-    for ca, stats in (board.get("tokens") or {}).items():
-        sym = stats.get("symbol") or "TOKEN"
-        tg = stats.get("telegram") or ""
+    def sum_window(events: List[List[Any]], start_ts: int, end_ts: int) -> float:
+        total = 0.0
+        for e in (events or []):
+            try:
+                ts = int(e[0])
+                v = float(e[1])
+                if start_ts <= ts <= end_ts:
+                    total += v
+            except Exception:
+                continue
+        return total
 
-        series = stats.get("mc_series") or []
-        if not series:
+    items = []  # (current_vol, sym, pct)
+    for ca, stats in (LEADERBOARD_STATS or {}).items():
+        if not isinstance(stats, dict):
             continue
+        sym = (stats.get("symbol") or "TOKEN").strip()
+        events = stats.get("events") or []
 
-        # Make sure series is time-ordered
-        series = sorted(series, key=lambda x: x.get("ts", 0))
+        cur_start = now - win_sec
+        cur_vol = sum_window(events, cur_start, now)
 
-        # Current MC from the latest snapshot (fallback to stored mc_usd)
-        current_mc = float((series[-1].get("mc") if isinstance(series[-1], dict) else 0) or stats.get("mc_usd") or 0)
-        if current_mc <= 0:
-            continue
+        prev_end = cur_start
+        prev_start = prev_end - prev_sec
+        prev_vol = sum_window(events, prev_start, prev_end)
 
-        # Baseline MC = earliest snapshot within the current 6h window
-        baseline_mc = None
-        cutoff = now - window_sec
-        for p in series:
-            ts = int(p.get("ts", 0) or 0)
-            if ts >= cutoff:
-                baseline_mc = float(p.get("mc") or 0)
-                break
+        pct = 0.0
+        if prev_vol > 0:
+            pct = (cur_vol - prev_vol) / prev_vol * 100.0
 
-        if baseline_mc and baseline_mc > 0:
-            pct = (current_mc - baseline_mc) / baseline_mc * 100.0
-        else:
-            pct = 0.0
+        if cur_vol > 0 or prev_vol > 0:
+            items.append((cur_vol, sym, pct))
 
-        items.append((current_mc, sym, tg, pct))
-
-    # Sort by market cap (desc) and take top-10
     items.sort(key=lambda x: x[0], reverse=True)
     top = items[:10]
 
-    def fmt_pct(p):
+    def fmt_pct(p: float) -> str:
         try:
             p = float(p)
         except Exception:
             p = 0.0
-        # Keep it simple like the reference screenshot: +23%, -20%, 0%
         if abs(p) < 0.5:
             return "0%"
         s = f"{p:.0f}%"
@@ -4038,40 +4097,33 @@ def build_leaderboard_text() -> str:
             s = "+" + s
         return s
 
-
-    # Header
     out: List[str] = []
-    out.append("🟢 <b>@Spytontrending</b>")
+    out.append("TON TRENDING")
+    out.append(f"🟢 <b>{h(LEADERBOARD_HEADER_HANDLE or '@Spytontrending')}</b>")
     out.append("")
 
     rank_badges = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
+
     if not top:
         out.append("No data yet — waiting for buys…")
     else:
-        for i, (mc, sym, tg, pct) in enumerate(top):
+        for i, (_vol, sym, pct) in enumerate(top):
             badge = rank_badges[i] if i < len(rank_badges) else f"{i+1}."
-            sym_html = h(sym)
-            if tg:
-                sym_html = f'<a href="{h(tg)}">{sym_html}</a>'
-            out.append(f"{badge} - {sym_html} | {fmt_metric(mc)} | {fmt_pct(pct)}")
+            out.append(f"{badge} - <b>{h(sym)}</b> | {fmt_pct(pct)}")
             if i == 2 and len(top) > 3:
                 out.append("---------------------------------------------")
 
     out.append("")
-    out.append("<blockquote>To trend use @SpyTONTrndBot to book trend</blockquote>")
+    out.append(f"<blockquote>To trend use {h(BOOK_TRENDING_URL or '@SpyTONTrndBot')} to book trend</blockquote>")
     return "\n".join(out)
 
 
 async def leaderboard_loop(app: Application):
     """Create/update a single Top-10 leaderboard message in the trending channel.
 
-    - Ranks by buy volume (TON) in the rolling organic window.
-    - Updates ONE fixed message (recommended) to avoid duplicates on redeploy.
-      Set:
-        TRENDING_POST_CHAT_ID = your channel numeric id (-100...)
-        LEADERBOARD_MESSAGE_ID = 25145  (the message to edit)
-      Optionally:
-        LEADERBOARD_CHAT_ID = override chat id (if different from TRENDING_POST_CHAT_ID)
+    Fixes:
+    - Loop never dies (try/except each iteration)
+    - Reuses stored message_id OR pinned message OR creates a new one
     """
     if not LEADERBOARD_ON:
         return
@@ -4091,98 +4143,99 @@ async def leaderboard_loop(app: Application):
     except Exception:
         fixed_msg_id = None
 
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("Ton Listing", url=LISTING_URL)]])
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("Ton Listing", url=LISTING_URL)]]) if LISTING_URL else None
     key = str(channel_id)
 
     while True:
-        state = _load_leaderboard_msg_state()
-        msg_id: Optional[int] = fixed_msg_id
+        try:
+            state = _load_leaderboard_msg_state()
+            msg_id: Optional[int] = fixed_msg_id
 
-        # If not fixed, try state file first
-        if not msg_id:
-            try:
-                msg_id = int(state.get(key) or 0) or None
-            except Exception:
-                msg_id = None
-
-        # If fixed, persist it into the state file (best-effort)
-        if fixed_msg_id:
-            try:
-                state[key] = int(fixed_msg_id)
-                _save_leaderboard_msg_state(state)
-            except Exception:
-                pass
-
-        # If no stored msg_id (common after redeploy on ephemeral FS),
-        # reuse the pinned leaderboard message in the channel (only when not fixed).
-        if (not fixed_msg_id) and (not msg_id):
-            try:
-                chat = await app.bot.get_chat(channel_id)
-                pm = getattr(chat, "pinned_message", None)
-                pm_text = (getattr(pm, "text", None) or getattr(pm, "caption", None) or "") if pm else ""
-                if pm and ("@Spytontrending" in pm_text or "SPYTON TRENDING" in pm_text):
-                    msg_id = int(pm.message_id)
-                    state[key] = msg_id
-                    _save_leaderboard_msg_state(state)
-            except Exception:
-                pass
-
-        text = build_leaderboard_text()
-
-        # 1) Try edit
-        if msg_id:
-            try:
-                await app.bot.edit_message_text(
-                    chat_id=channel_id,
-                    message_id=int(msg_id),
-                    text=text,
-                    parse_mode="HTML",
-                    disable_web_page_preview=True,
-                    reply_markup=kb,
-                )
-            except Exception as e:
-                emsg = str(e).lower()
-
-                # Ignore harmless errors (do not recreate!)
-                if "message is not modified" in emsg:
-                    pass
-                elif "flood" in emsg or "too many requests" in emsg:
-                    pass
-                elif fixed_msg_id:
-                    # Fixed message mode: NEVER create a new message.
-                    log.warning("leaderboard edit failed (fixed msg_id=%s): %s", fixed_msg_id, e)
-                # Only recreate when we're sure the message can't be edited / doesn't exist
-                elif ("message to edit not found" in emsg) or ("message can't be edited" in emsg) or ("message_id_invalid" in emsg):
-                    try:
-                        state.pop(key, None)
-                        _save_leaderboard_msg_state(state)
-                    except Exception:
-                        pass
-                    msg_id = None
-                else:
-                    log.warning("leaderboard edit failed (kept msg_id): %s", e)
-
-        # 2) Send if needed (ONLY when not in fixed mode)
-        if (not fixed_msg_id) and (not msg_id):
-            try:
-                m = await app.bot.send_message(
-                    chat_id=channel_id,
-                    text=text,
-                    parse_mode="HTML",
-                    disable_web_page_preview=True,
-                    reply_markup=kb,
-                )
-                msg_id = int(m.message_id)
-                state[key] = msg_id
-                _save_leaderboard_msg_state(state)
+            if not msg_id:
                 try:
-                    await app.bot.pin_chat_message(chat_id=channel_id, message_id=msg_id, disable_notification=True)
+                    msg_id = int(state.get(key) or 0) or None
+                except Exception:
+                    msg_id = None
+
+            # Persist fixed id (best-effort)
+            if fixed_msg_id:
+                try:
+                    state[key] = int(fixed_msg_id)
+                    _save_leaderboard_msg_state(state)
                 except Exception:
                     pass
-            except Exception as e:
-                log.warning("leaderboard send failed: %s", e)
+
+            # If no stored msg_id, try pinned message (only when not fixed)
+            if (not fixed_msg_id) and (not msg_id):
+                try:
+                    chat = await app.bot.get_chat(channel_id)
+                    pm = getattr(chat, "pinned_message", None)
+                    pm_text = (getattr(pm, "text", None) or getattr(pm, "caption", None) or "") if pm else ""
+                    needle = (LEADERBOARD_HEADER_HANDLE or "@Spytontrending").strip()
+                    if pm and needle and needle in pm_text:
+                        msg_id = int(pm.message_id)
+                        state[key] = msg_id
+                        _save_leaderboard_msg_state(state)
+                except Exception:
+                    pass
+
+            text = build_leaderboard_text()
+
+            # 1) Edit if possible
+            if msg_id:
+                try:
+                    await app.bot.edit_message_text(
+                        chat_id=channel_id,
+                        message_id=int(msg_id),
+                        text=text,
+                        parse_mode="HTML",
+                        disable_web_page_preview=True,
+                        reply_markup=kb,
+                    )
+                except Exception as e:
+                    emsg = str(e).lower()
+                    if "message is not modified" in emsg:
+                        pass
+                    elif "flood" in emsg or "too many requests" in emsg:
+                        pass
+                    elif fixed_msg_id:
+                        log.warning("leaderboard edit failed (fixed msg_id=%s): %s", fixed_msg_id, e)
+                    elif ("message to edit not found" in emsg) or ("message can't be edited" in emsg) or ("message_id_invalid" in emsg):
+                        try:
+                            state.pop(key, None)
+                            _save_leaderboard_msg_state(state)
+                        except Exception:
+                            pass
+                        msg_id = None
+                    else:
+                        log.warning("leaderboard edit failed (kept msg_id): %s", e)
+
+            # 2) Send if needed (only when not fixed)
+            if (not fixed_msg_id) and (not msg_id):
+                try:
+                    m = await app.bot.send_message(
+                        chat_id=channel_id,
+                        text=text,
+                        parse_mode="HTML",
+                        disable_web_page_preview=True,
+                        reply_markup=kb,
+                    )
+                    msg_id = int(m.message_id)
+                    state[key] = msg_id
+                    _save_leaderboard_msg_state(state)
+                    try:
+                        await app.bot.pin_chat_message(chat_id=channel_id, message_id=msg_id, disable_notification=True)
+                    except Exception:
+                        pass
+                except Exception as e:
+                    log.warning("leaderboard send failed: %s", e)
+
+        except Exception as e:
+            log.exception("leaderboard_loop iteration error: %s", e)
 
         await asyncio.sleep(LEADERBOARD_INTERVAL)
+
+
 async def on_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # when bot added to group, post premium intro
     try:
