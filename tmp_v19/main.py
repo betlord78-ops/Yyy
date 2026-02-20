@@ -3778,7 +3778,7 @@ def build_leaderboard_text() -> str:
         vol = sum(float(e[1]) for e in pruned if isinstance(e, list) and len(e) >= 2)
         sym = str(bucket.get("symbol") or "TOKEN").strip()
         tg = str(bucket.get("telegram") or "").strip()
-        items.append((vol, sym, tg))
+        items.append((vol, sym, tg, jetton))
 
     # keep stats tidy
     try:
@@ -3799,11 +3799,14 @@ def build_leaderboard_text() -> str:
     if not top:
         lines.append("No data yet — waiting for buys…")
     else:
-        for i, (vol, sym, tg) in enumerate(top):
+        for i, (vol, sym, tg, jetton) in enumerate(top):
             badge = rank_badges[i] if i < len(rank_badges) else f"{i+1}."
             sym_html = h(sym)
-            if tg:
-                sym_html = f'<a href="{h(tg)}">{sym_html}</a>'
+            url = tg.strip() if tg else ""
+            if not url and jetton:
+                url = "https://tonviewer.com/jetton/" + str(jetton)
+            if url:
+                sym_html = f'<a href="{h(url)}">{sym_html}</a>'
             lines.append(f"{badge} {sym_html} | {_humanize_num(vol)} | 0%")
 
     lines.append("")
