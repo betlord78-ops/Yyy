@@ -31,13 +31,31 @@ TRENDING_URL = os.getenv("TRENDING_URL", "https://t.me/SpyTonTrending").strip()
 DEFAULT_TOKEN_TG = os.getenv("DEFAULT_TOKEN_TG", "https://t.me/SpyTonEco").strip()
 LISTING_URL = os.getenv("LISTING_URL", "https://t.me/TonProjectListing").strip()
 
+DATA_DIR = os.getenv("DATA_DIR", "").strip()
+def _data_path(p: str) -> str:
+    if not p:
+        return p
+    if DATA_DIR and (not os.path.isabs(p)):
+        return os.path.join(DATA_DIR, p)
+    return p
+if DATA_DIR:
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+    except Exception:
+        pass
+
 # Trending leaderboard (Top-10) message in the trending channel.
 LEADERBOARD_ON = str(os.getenv("LEADERBOARD_ON", "1")).strip().lower() in ("1","true","yes","on")
 LEADERBOARD_INTERVAL = max(30, int(float(os.getenv("LEADERBOARD_INTERVAL", "60"))))
-LEADERBOARD_WINDOW_HOURS = max(1, int(float(os.getenv("LEADERBOARD_WINDOW_HOURS", "24"))))
-LEADERBOARD_STATS_FILE = os.getenv("LEADERBOARD_STATS_FILE", "leaderboard_stats.json")
-LEADERBOARD_MSG_FILE = os.getenv("LEADERBOARD_MSG_FILE", "leaderboard_msg.json")
+LEADERBOARD_WINDOW_HOURS = max(1, int(float(os.getenv("LEADERBOARD_WINDOW_HOURS", "6"))))
+# Used for the % column in the organic leaderboard: compare current window vs previous window.
+LEADERBOARD_COMPARE_WINDOW_HOURS = max(1, int(float(os.getenv("LEADERBOARD_COMPARE_WINDOW_HOURS", str(LEADERBOARD_WINDOW_HOURS)))))
+LEADERBOARD_STATS_FILE = _data_path(os.getenv("LEADERBOARD_STATS_FILE", "leaderboard_stats.json"))
+LEADERBOARD_MSG_FILE = _data_path(os.getenv("LEADERBOARD_MSG_FILE", "leaderboard_msg.json"))
 BOOK_TRENDING_URL = os.getenv("BOOK_TRENDING_URL", "https://t.me/SpyTONTrndBot").strip()
+LEADERBOARD_HEADER_HANDLE = os.getenv("LEADERBOARD_HEADER_HANDLE", "@Spytontrending").strip()
+LEADERBOARD_MESSAGE_ID_STR = os.getenv("LEADERBOARD_MESSAGE_ID", "").strip()  # e.g. 25145
+LEADERBOARD_CHAT_ID_STR = os.getenv("LEADERBOARD_CHAT_ID", "").strip()  # optional; defaults to TRENDING_POST_CHAT_ID
 
 # Optional: mirror *all* buy posts into an official trending/listing channel.
 # Set TRENDING_POST_CHAT_ID to your channel's numeric id (e.g. -100123...).
@@ -47,17 +65,17 @@ MIRROR_TO_TRENDING = str(os.getenv("MIRROR_TO_TRENDING", "0")).strip().lower() i
 
 # Owner-only Ads system
 OWNER_IDS = [int(x) for x in re.split(r"[ ,;]+", os.getenv("OWNER_IDS", "").strip()) if x.strip().isdigit()]
-ADS_FILE = os.getenv("ADS_FILE", "ads_public.json")
+ADS_FILE = _data_path(os.getenv("ADS_FILE", "ads_public.json"))
 DEFAULT_AD_TEXT = os.getenv("DEFAULT_AD_TEXT", "Buy ads on SpyTON — DM @Vseeton").strip()
 DEFAULT_AD_LINK = os.getenv("DEFAULT_AD_LINK", "https://t.me/vseeton").strip()
 GECKO_BASE = os.getenv("GECKO_BASE", "https://api.geckoterminal.com/api/v2").strip().rstrip("/")
 
-DATA_FILE = os.getenv("GROUPS_FILE", "groups_public.json")
-SEEN_FILE = os.getenv("SEEN_FILE", "seen_public.json")
+DATA_FILE = _data_path(os.getenv("GROUPS_FILE", "groups_public.json"))
+SEEN_FILE = _data_path(os.getenv("SEEN_FILE", "seen_public.json"))
 
 # Owner-added tokens that are tracked globally (posted in the trending channel even if no group added the bot).
 # Stored by jetton master address.
-GLOBAL_TOKENS_FILE = os.getenv("GLOBAL_TOKENS_FILE", "tokens_public.json")
+GLOBAL_TOKENS_FILE = _data_path(os.getenv("GLOBAL_TOKENS_FILE", "tokens_public.json"))
 
 # Dexscreener endpoints (used to resolve pool<->token)
 DEX_TOKEN_URL = os.getenv("DEX_TOKEN_URL", "https://api.dexscreener.com/latest/dex/tokens").rstrip("/")
@@ -148,13 +166,65 @@ def ensure_ton_leg_for_pool(token: Dict[str, Any]) -> Optional[int]:
     quote = (meta.get("quoteToken") or {})
     base_sym = str(base.get("symbol") or "").upper()
     quote_sym = str(quote.get("symbol") or "").upper()
-    if base_sym in ("TON","WTON"):
+    if base_sym in ("TON","WTON","PTON"):
         token["ton_leg"] = 0
         return 0
-    if quote_sym in ("TON","WTON"):
+    if quote_sym in ("TON","WTON","PTON"):
         token["ton_leg"] = 1
         return 1
     return None
+
+# Treat TON-like wrappers as TON in swap feeds
+TON_LIKE_SYMS = {"TON", "WTON", "PTON", "pTON", "wTON", "wton"}
+
+def ston_event_ton_leg(ev: Dict[str, Any]) -> Optional[int]:
+    """Infer which event leg (0/1) is TON using symbols included in STON export events."""
+    def _sym(v: Any) -> str:
+        if v is None:
+            return ""
+        return str(v).strip()
+
+    s0 = _sym(ev.get("token0Symbol") or ev.get("token0_symbol") or ev.get("symbol0"))
+    s1 = _sym(ev.get("token1Symbol") or ev.get("token1_symbol") or ev.get("symbol1"))
+
+    # Sometimes token0/token1 are dicts
+    if isinstance(ev.get("token0"), dict):
+        s0 = _sym(ev["token0"].get("symbol") or ev["token0"].get("ticker") or s0)
+    if isinstance(ev.get("token1"), dict):
+        s1 = _sym(ev["token1"].get("symbol") or ev["token1"].get("ticker") or s1)
+
+    s0u = s0.upper()
+    s1u = s1.upper()
+    ton_set = {x.upper() for x in TON_LIKE_SYMS}
+    if s0u in ton_set:
+        return 0
+    if s1u in ton_set:
+        return 1
+    return None
+
+def ston_event_is_buy(ev: Dict[str, Any], ton_leg: int):
+    """Return (is_buy, ton_spent, token_received). Sells are ignored (is_buy=False)."""
+    a0_in = _to_float(ev.get("amount0In"))
+    a0_out = _to_float(ev.get("amount0Out"))
+    a1_in = _to_float(ev.get("amount1In"))
+    a1_out = _to_float(ev.get("amount1Out"))
+
+    if ton_leg == 0:
+        # BUY: TON in (leg0), token out (leg1)
+        if a0_in > 0 and a1_out > 0:
+            return True, a0_in, a1_out
+        # SELL would be a1_in > 0 and a0_out > 0 (ignore)
+        return False, 0.0, 0.0
+
+    if ton_leg == 1:
+        # BUY: TON in (leg1), token out (leg0)
+        if a1_in > 0 and a0_out > 0:
+            return True, a1_in, a0_out
+        # SELL would be a0_in > 0 and a1_out > 0 (ignore)
+        return False, 0.0, 0.0
+
+    return False, 0.0, 0.0
+
 
 # -------------------- DEDUST API (for pool discovery + trades) --------------------
 DEDUST_API = os.getenv("DEDUST_API", "https://api.dedust.io").rstrip("/")
@@ -634,7 +704,13 @@ def _prune_events(events: List[List[Any]], window_sec: int) -> List[List[Any]]:
     return out
 
 def record_buy_for_leaderboard(token: Dict[str, Any], ton_amount: float):
-    """Record a buy into the rolling leaderboard stats."""
+    """Record a buy into the rolling leaderboard stats.
+
+    We keep:
+      - events: rolling TON volume within window (legacy/optional)
+      - mc_series: rolling market cap snapshots (USD) within window (for % change)
+      - mc_usd: latest known market cap (USD) for sorting
+    """
     if not LEADERBOARD_ON:
         return
     try:
@@ -643,21 +719,42 @@ def record_buy_for_leaderboard(token: Dict[str, Any], ton_amount: float):
             return
         sym = str(token.get("symbol") or "").strip() or "TOKEN"
         name = str(token.get("name") or "").strip() or sym
-        window_sec = int(LEADERBOARD_WINDOW_HOURS) * 3600
+        # Keep enough events to compute both current and previous windows.
+        keep_sec = (int(LEADERBOARD_WINDOW_HOURS) + int(LEADERBOARD_COMPARE_WINDOW_HOURS)) * 3600
         tg = str(token.get("telegram") or "").strip()
+
         bucket = LEADERBOARD_STATS.get(jetton)
         if not isinstance(bucket, dict):
-            bucket = {"symbol": sym, "name": name, "telegram": tg, "events": []}
+            bucket = {"symbol": sym, "name": name, "telegram": tg, "events": [], "mc_series": []}
             LEADERBOARD_STATS[jetton] = bucket
+
         bucket["symbol"] = sym
         bucket["name"] = name
         if tg:
             bucket["telegram"] = tg
+
+        # volume (optional)
         events = bucket.get("events")
         if not isinstance(events, list):
             events = []
         events.append([int(time.time()), float(ton_amount or 0.0)])
-        bucket["events"] = _prune_events(events, window_sec)
+        bucket["events"] = _prune_events(events, keep_sec)
+
+        # market cap snapshots (for sorting + % change)
+        mc = token.get("mc_usd")
+        try:
+            mc_val = float(mc) if mc is not None else None
+        except Exception:
+            mc_val = None
+        if mc_val is not None and mc_val > 0:
+            bucket["mc_usd"] = mc_val
+            series = bucket.get("mc_series")
+            if not isinstance(series, list):
+                series = []
+            series.append([int(time.time()), mc_val])
+            # reuse prune helper (expects [ts, val])
+            bucket["mc_series"] = _prune_events(series, keep_sec)
+
         save_leaderboard_stats()
     except Exception:
         return
@@ -1465,34 +1562,82 @@ def stonfi_extract_buys_from_tonapi_tx(tx: Dict[str, Any], token_addr: str) -> L
         if dex_name and "ston" not in dex_name:
             continue
 
-        # Try common fields TonAPI uses
-        ton_in = _to_float(aa.get("amount_in") or aa.get("amountIn") or 0)
-        jet_out = _to_float(aa.get("amount_out") or aa.get("amountOut") or 0)
-
         in_asset = aa.get("asset_in") or aa.get("assetIn") or aa.get("in") or {}
         out_asset = aa.get("asset_out") or aa.get("assetOut") or aa.get("out") or {}
 
-        def asset_addr(x):
+        def _asset_addr(x: Any) -> str:
             if isinstance(x, dict):
-                addr = x.get("address") or x.get("master") or x.get("jetton_master") or ""
+                addr = x.get("address") or x.get("master") or x.get("jetton_master") or x.get("jettonMaster") or ""
                 return str(addr)
             return ""
 
-        in_addr = asset_addr(in_asset)
-        out_addr = asset_addr(out_asset)
+        def _is_ton_asset(x: Any) -> bool:
+            if not isinstance(x, dict):
+                return False
+            t = str(x.get("type") or x.get("kind") or x.get("asset_type") or "").lower()
+            if t == "ton":
+                return True
+            sym = str(x.get("symbol") or x.get("ticker") or x.get("name") or "").lower()
+            if sym in ("ton","wton","pton"):
+                return True
+            # TonAPI sometimes stores ton as a dict without address, but with decimals=9
+            if _asset_addr(x) in ("", None) and str(x).lower().find("ton") != -1:
+                return True
+            return False
 
-        # determine if TON in and token out
-        is_buy = False
-        # TonAPI might represent TON as "TON" or empty addr
-        if out_addr == token_addr and (in_addr == "" or "ton" in str(in_asset).lower()):
-            is_buy = True
-        # sometimes out asset is jetton dict nested
-        if not is_buy:
-            # look inside swap details if present
-            if str(out_addr) == token_addr and ton_in > 0:
-                is_buy = True
+        def _parse_amount(raw: Any, asset: Any) -> Optional[float]:
+            """Handle both already-decimal numbers and raw on-chain integers."""
+            if raw is None:
+                return None
+            # numeric
+            if isinstance(raw, (int, float)):
+                val = float(raw)
+            else:
+                s = str(raw).strip()
+                if not s:
+                    return None
+                # if it looks like an integer string, keep as int-like
+                if s.replace("-", "").isdigit():
+                    try:
+                        val = float(int(s))
+                    except Exception:
+                        val = _to_float(s)
+                else:
+                    val = _to_float(s)
 
-        if not is_buy:
+            # scale if it looks like a raw integer
+            dec = None
+            if isinstance(asset, dict):
+                d = asset.get("decimals")
+                if isinstance(d, int):
+                    dec = d
+                else:
+                    try:
+                        dec = int(d)
+                    except Exception:
+                        dec = None
+
+            if dec is not None:
+                # If we got a big integer-ish value and no decimal point in original, assume raw.
+                raw_s = str(raw).strip() if raw is not None else ""
+                if raw_s and raw_s.replace("-", "").isdigit() and abs(val) >= 10 ** (dec + 2):
+                    val = val / (10 ** dec)
+
+            return val
+
+        in_addr = _asset_addr(in_asset)
+        out_addr = _asset_addr(out_asset)
+
+        amt_in = _parse_amount(aa.get("amount_in") or aa.get("amountIn"), in_asset)
+        amt_out = _parse_amount(aa.get("amount_out") or aa.get("amountOut"), out_asset)
+
+        # BUY must be TON -> token
+        if not (_is_ton_asset(in_asset) and str(out_addr) == str(token_addr)):
+            continue
+
+        ton_in = amt_in
+        jet_out = amt_out
+        if not ton_in or not jet_out:
             continue
 
         buyer = (aa.get("user") or aa.get("sender") or aa.get("initiator") or aa.get("from") or "")
@@ -1503,8 +1648,8 @@ def stonfi_extract_buys_from_tonapi_tx(tx: Dict[str, Any], token_addr: str) -> L
         out.append({
             "tx": tx_hash,
             "buyer": buyer,
-            "ton": ton_in if ton_in else None,
-            "token_amount": jet_out if jet_out else None,
+            "ton": ton_in,
+            "token_amount": jet_out,
         })
 
     return out
@@ -1531,13 +1676,51 @@ def dedust_extract_buys_from_tonapi_event(ev: Dict[str, Any], token_addr: str) -
         if dex_name and "dedust" not in dex_name and "de dust" not in dex_name:
             continue
 
-        # This varies; best-effort
-        ton_in = _to_float(a.get("amount_in") or a.get("amountIn") or a.get("in_amount") or 0)
+        # Normalize swap data: only treat as BUY when TON -> token_addr.
+        in_asset = a.get("asset_in") or a.get("assetIn") or a.get("in") or {}
         out_asset = a.get("asset_out") or a.get("assetOut") or a.get("out") or {}
+        amt_in_raw = a.get("amount_in") or a.get("amountIn") or a.get("in_amount") or a.get("amount") or 0
+        amt_out_raw = a.get("amount_out") or a.get("amountOut") or a.get("out_amount") or 0
+
+        def _is_ton_asset(x: Any) -> bool:
+            if not isinstance(x, dict):
+                return False
+            t = str(x.get("type") or "").lower()
+            sym = str(x.get("symbol") or x.get("ticker") or "").lower()
+            return t == "ton" or sym == "ton"
+
+        def _parse_amount(raw: Any, asset: Any) -> float:
+            s = str(raw).strip()
+            if s == "" or s.lower() in ("none", "null"):
+                return 0.0
+            if "." in s:
+                return _to_float(s)
+            if s.isdigit():
+                dec = 0
+                if isinstance(asset, dict):
+                    try:
+                        dec = int(asset.get("decimals") or 0)
+                    except Exception:
+                        dec = 0
+                try:
+                    return int(s) / (10 ** max(dec, 0))
+                except Exception:
+                    return _to_float(s)
+            return _to_float(s)
+
+        in_is_ton = _is_ton_asset(in_asset)
         out_addr = ""
+        out_symbol = ""
         if isinstance(out_asset, dict):
             out_addr = str(out_asset.get("address") or out_asset.get("master") or "")
-        if out_addr and out_addr != token_addr:
+            out_symbol = str(out_asset.get("symbol") or out_asset.get("ticker") or "")
+
+        if not (in_is_ton and out_addr == token_addr):
+            continue
+
+        ton_in = _parse_amount(amt_in_raw, in_asset)
+        jet_out = _parse_amount(amt_out_raw, out_asset)
+        if ton_in <= 0 or jet_out <= 0:
             continue
 
         buyer = (a.get("user") or a.get("sender") or a.get("initiator") or a.get("from") or "")
@@ -1545,10 +1728,7 @@ def dedust_extract_buys_from_tonapi_event(ev: Dict[str, Any], token_addr: str) -
             buyer = buyer.get("address") or ""
         buyer = str(buyer)
 
-        if ton_in <= 0:
-            continue
-
-        out.append({"tx": tx_hash, "buyer": buyer, "ton": ton_in})
+        out.append({"tx": tx_hash, "buyer": buyer, "ton": ton_in, "token": jet_out, "symbol": out_symbol})
     return out
 
 # -------------------- UI --------------------
@@ -1846,6 +2026,93 @@ async def addtoken_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"Telegram: {tg_url}")
     lines.append("\nNotes:\n• Buys will post in the trending channel even if the project didn't add the bot to their group.")
     await update.message.reply_text("\n".join(lines), disable_web_page_preview=True)
+
+
+async def tokens_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner-only: list tokens manually added via /addtoken."""
+    if not is_owner(update.effective_user):
+        return
+
+    if not GLOBAL_TOKENS:
+        await update.message.reply_text("No manually-added tokens yet.")
+        return
+
+    # Sort by symbol for readability
+    items = sorted(GLOBAL_TOKENS.items(), key=lambda kv: (str(kv[1].get("symbol") or ""), kv[0]))
+    lines: List[str] = ["🧾 Manual tokens (added by you):"]
+
+    def _short(addr: str) -> str:
+        if not addr:
+            return "—"
+        return addr[:6] + "..." + addr[-4:]
+
+    for jetton, info in items:
+        sym = str(info.get("symbol") or "TOKEN")
+        tg = str(info.get("telegram") or "").strip()
+        dex = str(info.get("dex") or "—")
+        pool = str(info.get("stonfi_pool") or info.get("dedust_pool") or "")
+
+        # Make symbol clickable to telegram if available
+        if tg.startswith("https://t.me/") or tg.startswith("t.me/"):
+            tg_url = tg if tg.startswith("https://") else "https://" + tg
+            sym_disp = f"<a href=\"{tg_url}\">{html.escape(sym)}</a>"
+        else:
+            sym_disp = html.escape(sym)
+
+        lines.append(f"• {sym_disp} — {html.escape(_short(jetton))} | {html.escape(dex)} | pool: {html.escape(_short(pool))}")
+
+    lines.append("\nDelete: /deltoken <jetton_ca>  (or /delpair <jetton_ca or pool>)")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
+
+async def deltoken_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner-only: remove a manually-added token so it no longer shows in leaderboard/channel."""
+    if not is_owner(update.effective_user):
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: /deltoken <jetton_ca>")
+        return
+
+    jetton = context.args[0].strip()
+    if jetton in GLOBAL_TOKENS:
+        removed = GLOBAL_TOKENS.pop(jetton)
+        save_groups()
+        await update.message.reply_text(f"✅ Removed {removed.get('symbol') or 'token'} ({jetton})")
+        return
+
+    await update.message.reply_text("❌ Token not found in manual list. Use /tokens to see what you added.")
+
+
+async def delpair_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner-only: alias to delete by jetton OR by pool/pair address."""
+    if not is_owner(update.effective_user):
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: /delpair <jetton_ca OR pool_address>")
+        return
+
+    key = context.args[0].strip()
+
+    # Direct jetton match
+    if key in GLOBAL_TOKENS:
+        removed = GLOBAL_TOKENS.pop(key)
+        save_groups()
+        await update.message.reply_text(f"✅ Removed {removed.get('symbol') or 'token'} ({key})")
+        return
+
+    # Try find by pool/pair address
+    for jetton, info in list(GLOBAL_TOKENS.items()):
+        if key == info.get("stonfi_pool") or key == info.get("dedust_pool"):
+            removed = GLOBAL_TOKENS.pop(jetton)
+            save_groups()
+            await update.message.reply_text(
+                f"✅ Removed {removed.get('symbol') or 'token'} (by pool match)\nJetton: {jetton}\nPool: {key}"
+            )
+            return
+
+    await update.message.reply_text("❌ Not found. Use /tokens to see your current manual tokens.")
 
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -2491,9 +2758,9 @@ def resolve_jetton_from_text_sync(text: str) -> Optional[str]:
                 quote_sym = str(quote.get("symbol") or "").upper()
                 base_addr = str(base.get("address") or "")
                 quote_addr = str(quote.get("address") or "")
-                if base_sym in ("TON","WTON") and quote_addr:
+                if base_sym in ("TON","WTON","PTON") and quote_addr:
                     return quote_addr
-                if quote_sym in ("TON","WTON") and base_addr:
+                if quote_sym in ("TON","WTON","PTON") and base_addr:
                     return base_addr
         return direct
 
@@ -2524,9 +2791,9 @@ def resolve_jetton_from_text_sync(text: str) -> Optional[str]:
     base_addr = str(base.get("address") or "")
     quote_addr = str(quote.get("address") or "")
     # choose the non-TON side
-    if base_sym in ("TON","WTON") and quote_addr:
+    if base_sym in ("TON","WTON","PTON") and quote_addr:
         return quote_addr
-    if quote_sym in ("TON","WTON") and base_addr:
+    if quote_sym in ("TON","WTON","PTON") and base_addr:
         return base_addr
     # if neither side says TON, still return base (best-effort)
     return base_addr or quote_addr or None
@@ -2984,7 +3251,7 @@ async def poll_once(app: Application):
                 # advance cursor only on successful fetch
                 token["ston_last_block"] = to_b
                 # filter swaps for this pool (STON export feed)
-                ton_leg = ensure_ton_leg_for_pool(token)
+                # ton_leg is determined per-event to avoid base/quote ordering issues
                 posted_any = False
                 for ev in evs:
                     if (str(ev.get("eventType") or "").lower() != "swap"):
@@ -3004,21 +3271,12 @@ async def poll_once(app: Application):
                     a0_out = _to_float(ev.get("amount0Out"))
                     a1_in = _to_float(ev.get("amount1In"))
                     a1_out = _to_float(ev.get("amount1Out"))
-                    ton_spent = 0.0
-                    token_received = 0.0
-                    if ton_leg == 0:
-                        if a0_in > 0 and a1_out > 0:
-                            ton_spent = a0_in
-                            token_received = a1_out
-                        else:
-                            continue
-                    elif ton_leg == 1:
-                        if a1_in > 0 and a0_out > 0:
-                            ton_spent = a1_in
-                            token_received = a0_out
-                        else:
-                            continue
-                    else:
+                    # Determine which leg is TON using event symbols (prevents sells being posted as buys)
+                    ton_leg = ston_event_ton_leg(ev)
+                    if ton_leg is None:
+                        ton_leg = ensure_ton_leg_for_pool(token)
+                    is_buy, ton_spent, token_received = ston_event_is_buy(ev, ton_leg if ton_leg in (0,1) else -1)
+                    if not is_buy:
                         continue
                     if ton_spent < min_buy:
                         continue
@@ -3380,13 +3638,54 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
         except Exception:
             pass
 
-    # Persist last known market stats (best-effort)
-    if price_usd is not None:
-        token["price_usd"] = float(price_usd)
-    if liq_usd is not None:
-        token["liq_usd"] = float(liq_usd)
-    if mc_usd is not None:
-        token["mc_usd"] = float(mc_usd)
+    # Persist last known market stats (best-effort) - do NOT store 0/invalid values
+    try:
+        if price_usd is not None and float(price_usd) > 0:
+            token["price_usd"] = float(price_usd)
+    except Exception:
+        pass
+    try:
+        if liq_usd is not None and float(liq_usd) > 0:
+            token["liq_usd"] = float(liq_usd)
+    except Exception:
+        pass
+    try:
+        if mc_usd is not None and float(mc_usd) > 0:
+            token["mc_usd"] = float(mc_usd)
+    except Exception:
+        pass
+    # Normalize market stats: treat 0/invalid as missing so we never show $0
+
+    try:
+
+        if price_usd is not None and float(price_usd) <= 0:
+
+            price_usd = None
+
+    except Exception:
+
+        price_usd = None
+
+    try:
+
+        if liq_usd is not None and float(liq_usd) <= 0:
+
+            liq_usd = None
+
+    except Exception:
+
+        liq_usd = None
+
+    try:
+
+        if mc_usd is not None and float(mc_usd) <= 0:
+
+            mc_usd = None
+
+    except Exception:
+
+        mc_usd = None
+
 
     # Store/refresh cache so later messages don't lose stats. Merge to avoid
     # overwriting non-null values with nulls.
@@ -3534,8 +3833,17 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
             got_line = f"🪙 <b>{h(tok_amt)} {sym_html}</b>"
 
     # Stats (match screenshot order: MarketCap, Liquidity, Holders)
-    mc_line = f"📊 MarketCap: {h(fmt_usd(mc_usd, 0) or '—')}" if bool(s.get("show_mcap", True)) else ""
-    liq_line = f"💧 Liquidity {h(fmt_usd(liq_usd, 0) or '—')}" if bool(s.get("show_liquidity", True)) else ""
+    def _pos_or_none(v):
+        try:
+            if v is None:
+                return None
+            fv = float(v)
+            return fv if fv > 0 else None
+        except Exception:
+            return None
+
+    mc_line = f"📊 MarketCap: {h(fmt_usd(_pos_or_none(mc_usd), 0) or '—')}" if bool(s.get("show_mcap", True)) else ""
+    liq_line = f"💧 Liquidity {h(fmt_usd(_pos_or_none(liq_usd), 0) or '—')}" if bool(s.get("show_liquidity", True)) else ""
     holders_line = ""
     if bool(s.get("show_holders", True)):
         hval = f"{holders:,}" if isinstance(holders, int) else (str(holders) if holders is not None else "—")
@@ -3599,9 +3907,21 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
         blocks.append("")
 
         # Market stats (always show the rows; use last-known or '—')
-        blocks.append(f"Price: {h(fmt_usd(price_usd, 6) or '—')}")
-        blocks.append(f"Liquidity: {h(fmt_usd(liq_usd, 0) or '—')}")
-        blocks.append(f"MCap: {h(fmt_usd(mc_usd, 0) or '—')}")
+        def _pos_or_none(v):
+            try:
+                if v is None:
+                    return None
+                fv = float(v)
+                return fv if fv > 0 else None
+            except Exception:
+                return None
+
+        price_disp = fmt_usd(_pos_or_none(price_usd), 6) or "—"
+        liq_disp = fmt_usd(_pos_or_none(liq_usd), 0) or "—"
+        mc_disp = fmt_usd(_pos_or_none(mc_usd), 0) or "—"
+        blocks.append(f"Price: {h(price_disp)}")
+        blocks.append(f"Liquidity: {h(liq_disp)}")
+        blocks.append(f"MCap: {h(mc_disp)}")
         blocks.append(f"Holders: {h(f'{int(holders):,}' if holders is not None else '—')}")
         # Inline text links row like the reference: TX | GT | DexS | Telegram | Trending
         link_parts = []
@@ -3760,160 +4080,230 @@ async def tracker_loop(app: Application):
 
 # -------------------- Trending Leaderboard (Top-10) --------------------
 def build_leaderboard_text() -> str:
-    """Build a Top-10 leaderboard message (HTML) similar to the reference style."""
+    """Build an organic Top-10 leaderboard message (HTML) similar to the reference style.
+
+    - Ranks tokens by TON buy volume over the last LEADERBOARD_WINDOW_HOURS.
+    - The % column shows share of current-window buy volume.
+    - Token symbols are clickable:
+        - if token telegram link is known -> links to that
+        - else -> links to tonviewer jetton page
+    """
     def h(s: Any) -> str:
         return html.escape(str(s or ""))
 
-    # prune + compute volumes
-    window_sec = int(LEADERBOARD_WINDOW_HOURS) * 3600
-    items = []
-    for jetton, bucket in (LEADERBOARD_STATS or {}).items():
-        if not isinstance(bucket, dict):
+    now = int(time.time())
+    cur_sec = int(LEADERBOARD_WINDOW_HOURS * 3600)
+    prev_sec = int(LEADERBOARD_COMPARE_WINDOW_HOURS * 3600)
+
+    items: List[Tuple[float, str, str, float, str]] = []  # (cur_vol_ton, sym, tg, pct_change, jetton)
+
+    for jetton, stats in (LEADERBOARD_STATS or {}).items():
+        if not isinstance(stats, dict):
             continue
-        events = bucket.get("events")
+        sym = str(stats.get("symbol") or "TOKEN")
+        tg = str(stats.get("telegram") or "").strip()
+        events = stats.get("events") or []
         if not isinstance(events, list):
             continue
-        pruned = _prune_events(events, window_sec)
-        bucket["events"] = pruned
-        vol = sum(float(e[1]) for e in pruned if isinstance(e, list) and len(e) >= 2)
-        sym = str(bucket.get("symbol") or "TOKEN").strip()
-        tg = str(bucket.get("telegram") or "").strip()
-        items.append((vol, sym, tg, jetton))
 
-    # keep stats tidy
-    try:
-        save_leaderboard_stats()
-    except Exception:
-        pass
+        cur_vol = 0.0
+        prev_vol = 0.0
 
+        # events: [[ts:int, ton:float], ...]
+        for e in events:
+            try:
+                ts = int(e[0])
+                ton = float(e[1] or 0.0)
+            except Exception:
+                continue
+
+            age = now - ts
+            if age < 0:
+                continue
+
+            if age <= cur_sec:
+                cur_vol += ton
+            elif age <= (cur_sec + prev_sec):
+                prev_vol += ton
+
+        if cur_vol <= 0:
+            continue
+
+
+        pct = 0.0
+        items.append((cur_vol, sym, tg, pct, str(jetton)))
+
+    # Sort by current volume (desc) and take top-10
     items.sort(key=lambda x: x[0], reverse=True)
     top = items[:10]
+    total_cur = sum(x[0] for x in top) if top else 0.0
 
-    # Header
-    lines: List[str] = []
-    # Header (keep it simple as requested)
-    lines.append(f"🟢 <b>SPYTON TRENDING</b>")
-    lines.append("")
+    def fmt_pct(p: Any) -> str:
+        try:
+            p = float(p)
+        except Exception:
+            p = 0.0
+        if abs(p) < 0.5:
+            return "0%"
+        # cap extremes for readability
+        if p > 999:
+            p = 999.0
+        if p < -999:
+            p = -999.0
+        s = f"{p:.0f}%"
+        return s
+
+    out: List[str] = []
+    out.append(f"🟢 <b>{h(LEADERBOARD_HEADER_HANDLE)}</b>")
+    out.append("")
 
     rank_badges = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
     if not top:
-        lines.append("No data yet — waiting for buys…")
+        out.append("No data yet — waiting for buys…")
     else:
-        for i, (vol, sym, tg, jetton) in enumerate(top):
+        for i, (cur_vol, sym, tg, pct, jetton) in enumerate(top):
             badge = rank_badges[i] if i < len(rank_badges) else f"{i+1}."
             sym_html = h(sym)
-            url = tg.strip() if tg else ""
-            if not url and jetton:
-                url = "https://tonviewer.com/jetton/" + str(jetton)
-            if url:
-                sym_html = f'<a href="{h(url)}">{sym_html}</a>'
-            lines.append(f"{badge} {sym_html} | {_humanize_num(vol)} | 0%")
 
-    lines.append("")
-    # Quote footer (Telegram HTML supports <blockquote>)
-    lines.append(f"<blockquote>To trend use @SpyTONTrndBot to book trend</blockquote>")
-    return "\n".join(lines)
+            link = tg if tg else f"https://tonviewer.com/jetton/{jetton}"
+            sym_html = f'<a href="{h(link)}">{sym_html}</a>'
 
+            share = (cur_vol / total_cur * 100.0) if total_cur > 0 else 0.0
+            out.append(f"{badge} - {sym_html} | {fmt_pct(share)}")
+
+            if i == 2 and len(top) > 3:
+                out.append("---------------------------------------------")
+
+    out.append("")
+    out.append("<blockquote>To trend use @SpyTONTrndBot to book trend</blockquote>")
+    return "\n".join(out)
 
 async def leaderboard_loop(app: Application):
     """Create/update a single Top-10 leaderboard message in the trending channel.
 
-    Anti-spam rules:
-      - Prefer editing an existing message_id (from state file).
-      - If state is missing (e.g. after restart), reuse the pinned leaderboard message if present.
-      - Only send a new message when we are sure the old one doesn't exist / can't be edited.
-      - Never send a new message just because edit failed for a transient reason (rate limits, bad request, etc).
+    Fixes:
+    - Loop never dies (try/except each iteration)
+    - Reuses stored message_id OR pinned message OR creates a new one
     """
-    if not (LEADERBOARD_ON and TRENDING_POST_CHAT_ID):
+    if not LEADERBOARD_ON:
+        return
+
+    chat_id_str = (LEADERBOARD_CHAT_ID_STR or TRENDING_POST_CHAT_ID or "").strip()
+    if not chat_id_str:
         return
     try:
-        channel_id = int(TRENDING_POST_CHAT_ID)
+        channel_id = int(chat_id_str)
     except Exception:
         return
 
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("Ton Listing", url=LISTING_URL)]])
+    fixed_msg_id: Optional[int] = None
+    try:
+        if LEADERBOARD_MESSAGE_ID_STR and LEADERBOARD_MESSAGE_ID_STR.isdigit():
+            fixed_msg_id = int(LEADERBOARD_MESSAGE_ID_STR)
+    except Exception:
+        fixed_msg_id = None
+
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("Ton Listing", url=LISTING_URL)]]) if LISTING_URL else None
     key = str(channel_id)
 
     while True:
-        # Always reload state so restarts / multiple deploys converge on a single message.
-        state = _load_leaderboard_msg_state()
-        msg_id: Optional[int] = None
         try:
-            msg_id = int(state.get(key) or 0) or None
-        except Exception:
-            msg_id = None
+            state = _load_leaderboard_msg_state()
+            msg_id: Optional[int] = fixed_msg_id
 
-        # If we don't have a stored msg_id (common after redeploy on ephemeral FS),
-        # try to reuse the pinned leaderboard message in the channel.
-        if not msg_id:
-            try:
-                chat = await app.bot.get_chat(channel_id)
-                pm = getattr(chat, "pinned_message", None)
-                pm_text = (getattr(pm, "text", None) or getattr(pm, "caption", None) or "") if pm else ""
-                if pm and "SPYTON TRENDING" in pm_text:
-                    msg_id = int(pm.message_id)
-                    state[key] = msg_id
-                    _save_leaderboard_msg_state(state)
-            except Exception:
-                pass
-
-        text = build_leaderboard_text()
-
-        # 1) Try edit
-        if msg_id:
-            try:
-                await app.bot.edit_message_text(
-                    chat_id=channel_id,
-                    message_id=msg_id,
-                    text=text,
-                    parse_mode="HTML",
-                    disable_web_page_preview=True,
-                    reply_markup=kb,
-                )
-            except Exception as e:
-                emsg = str(e).lower()
-
-                # Ignore harmless errors (do not recreate!)
-                if "message is not modified" in emsg:
-                    pass
-                elif "flood" in emsg or "too many requests" in emsg:
-                    pass
-                # Only recreate when we're sure the message can't be edited / doesn't exist
-                elif ("message to edit not found" in emsg) or ("message can't be edited" in emsg) or ("message_id_invalid" in emsg):
-                    try:
-                        state.pop(key, None)
-                        _save_leaderboard_msg_state(state)
-                    except Exception:
-                        pass
-                    msg_id = None
-                else:
-                    # Unknown/transient error: keep msg_id and do NOT spam a new message
-                    log.warning("leaderboard edit failed (kept msg_id): %s", e)
-
-        # 2) Send if needed
-        if not msg_id:
-            try:
-                m = await app.bot.send_message(
-                    chat_id=channel_id,
-                    text=text,
-                    parse_mode="HTML",
-                    disable_web_page_preview=True,
-                    reply_markup=kb,
-                )
-                msg_id = int(m.message_id)
-                state[key] = msg_id
-                _save_leaderboard_msg_state(state)
-                # Best-effort pin (requires permissions). Ignore failures.
+            if not msg_id:
                 try:
-                    await app.bot.pin_chat_message(chat_id=channel_id, message_id=msg_id, disable_notification=True)
+                    msg_id = int(state.get(key) or 0) or None
+                except Exception:
+                    msg_id = None
+
+            # Persist fixed id (best-effort)
+            if fixed_msg_id:
+                try:
+                    state[key] = int(fixed_msg_id)
+                    _save_leaderboard_msg_state(state)
                 except Exception:
                     pass
+
+            # If no stored msg_id, try pinned message (only when not fixed)
+            if (not fixed_msg_id) and (not msg_id):
+                try:
+                    chat = await app.bot.get_chat(channel_id)
+                    pm = getattr(chat, "pinned_message", None)
+                    pm_text = (getattr(pm, "text", None) or getattr(pm, "caption", None) or "") if pm else ""
+                    needle = (LEADERBOARD_HEADER_HANDLE or "@Spytontrending").strip()
+                    if pm and needle and needle in pm_text:
+                        msg_id = int(pm.message_id)
+                        state[key] = msg_id
+                        _save_leaderboard_msg_state(state)
+                except Exception:
+                    pass
+
+            try:
+
+                text = build_leaderboard_text()
+
             except Exception as e:
-                log.warning("leaderboard send failed: %s", e)
+
+                log.exception("build_leaderboard_text error: %s", e)
+
+                text = "🟢 <b>%s</b>\n\nNo data yet — waiting for buys…\n\n<blockquote>To trend use @SpyTONTrndBot to book trend</blockquote>" % (LEADERBOARD_HEADER_HANDLE or "@Spytontrending")
+
+            # 1) Edit if possible
+            if msg_id:
+                try:
+                    await app.bot.edit_message_text(
+                        chat_id=channel_id,
+                        message_id=int(msg_id),
+                        text=text,
+                        parse_mode="HTML",
+                        disable_web_page_preview=True,
+                        reply_markup=kb,
+                    )
+                except Exception as e:
+                    emsg = str(e).lower()
+                    if "message is not modified" in emsg:
+                        pass
+                    elif "flood" in emsg or "too many requests" in emsg:
+                        pass
+                    elif fixed_msg_id:
+                        log.warning("leaderboard edit failed (fixed msg_id=%s): %s", fixed_msg_id, e)
+                    elif ("message to edit not found" in emsg) or ("message can't be edited" in emsg) or ("message_id_invalid" in emsg):
+                        try:
+                            state.pop(key, None)
+                            _save_leaderboard_msg_state(state)
+                        except Exception:
+                            pass
+                        msg_id = None
+                    else:
+                        log.warning("leaderboard edit failed (kept msg_id): %s", e)
+
+            # 2) Send if needed (only when not fixed)
+            if (not fixed_msg_id) and (not msg_id):
+                try:
+                    m = await app.bot.send_message(
+                        chat_id=channel_id,
+                        text=text,
+                        parse_mode="HTML",
+                        disable_web_page_preview=True,
+                        reply_markup=kb,
+                    )
+                    msg_id = int(m.message_id)
+                    state[key] = msg_id
+                    _save_leaderboard_msg_state(state)
+                    try:
+                        await app.bot.pin_chat_message(chat_id=channel_id, message_id=msg_id, disable_notification=True)
+                    except Exception:
+                        pass
+                except Exception as e:
+                    log.warning("leaderboard send failed: %s", e)
+
+        except Exception as e:
+            log.exception("leaderboard_loop iteration error: %s", e)
 
         await asyncio.sleep(LEADERBOARD_INTERVAL)
 
-# -------------------- Chat member welcome --------------------
+
 async def on_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # when bot added to group, post premium intro
     try:
@@ -3970,6 +4360,10 @@ def main():
 
     application.add_handler(CommandHandler("start", start_cmd))
     application.add_handler(CommandHandler("addtoken", addtoken_cmd))
+    application.add_handler(CommandHandler("tokens", tokens_cmd))
+    application.add_handler(CommandHandler("mytokens", tokens_cmd))
+    application.add_handler(CommandHandler("deltoken", deltoken_cmd))
+    application.add_handler(CommandHandler("delpair", delpair_cmd))
     application.add_handler(CommandHandler("adset", adset_cmd))
     application.add_handler(CommandHandler("adclear", adclear_cmd))
     application.add_handler(CommandHandler("adstatus", adstatus_cmd))
