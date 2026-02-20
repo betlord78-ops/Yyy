@@ -3938,7 +3938,7 @@ def build_leaderboard_text() -> str:
     items.sort(key=lambda x: x[0], reverse=True)
     top = items[:10]
 
-def fmt_pct(p):
+    def fmt_pct(p):
         try:
             p = float(p)
         except Exception:
