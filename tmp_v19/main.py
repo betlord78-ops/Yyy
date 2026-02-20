@@ -4080,103 +4080,151 @@ async def tracker_loop(app: Application):
 
 # -------------------- Trending Leaderboard (Top-10) --------------------
 def build_leaderboard_text() -> str:
-    """Build an organic Top-10 leaderboard message (HTML) similar to the reference style.
+    """Build Top Movers leaderboard using the Bit-main format.
 
-    - Ranks tokens by TON buy volume over the last LEADERBOARD_WINDOW_HOURS.
-    - The % column shows share of current-window buy volume.
-    - Token symbols are clickable:
-        - if token telegram link is known -> links to that
-        - else -> links to tonviewer jetton page
+    Instead of buy-volume %, this uses **Dexscreener priceChange** (h6 fallback h1)
+    so it updates naturally as the market moves.
+
+    Candidates are derived from:
+      - all configured group tokens
+      - all GLOBAL_TOKENS
+
+    Token symbol is clickable (token telegram if known; else tonviewer jetton page).
     """
+
     def h(s: Any) -> str:
         return html.escape(str(s or ""))
 
+    # simple local cache to avoid spamming dexscreener on every tick
+    # key -> {ts:int, data:dict}
+    global _LB_PAIR_CACHE
+    try:
+        _LB_PAIR_CACHE
+    except Exception:
+        _LB_PAIR_CACHE = {}
+
     now = int(time.time())
-    cur_sec = int(LEADERBOARD_WINDOW_HOURS * 3600)
-    prev_sec = int(LEADERBOARD_COMPARE_WINDOW_HOURS * 3600)
+    cache_ttl = 45
 
-    items: List[Tuple[float, str, str, float, str]] = []  # (cur_vol_ton, sym, tg, pct_change, jetton)
+    def pair_lookup_cached(pair_id: str) -> Optional[Dict[str, Any]]:
+        pair_id = (pair_id or "").strip()
+        if not pair_id:
+            return None
+        c = _LB_PAIR_CACHE.get(pair_id)
+        if isinstance(c, dict) and (now - int(c.get("ts") or 0) <= cache_ttl) and isinstance(c.get("data"), dict):
+            return c["data"]
+        d = _dex_pair_lookup(pair_id)
+        if isinstance(d, dict):
+            _LB_PAIR_CACHE[pair_id] = {"ts": now, "data": d}
+        return d
 
-    for jetton, stats in (LEADERBOARD_STATS or {}).items():
-        if not isinstance(stats, dict):
+    # Build candidate token list
+    candidates: Dict[str, Dict[str, Any]] = {}  # jetton -> token dict
+
+    for g in (GROUPS or {}).values():
+        if not isinstance(g, dict):
             continue
-        sym = str(stats.get("symbol") or "TOKEN")
-        tg = str(stats.get("telegram") or "").strip()
-        events = stats.get("events") or []
-        if not isinstance(events, list):
+        tok = g.get("token")
+        if isinstance(tok, dict):
+            j = str(tok.get("address") or "").strip()
+            if j:
+                candidates[j] = tok
+
+    for j, tok in (GLOBAL_TOKENS or {}).items():
+        if isinstance(tok, dict):
+            jj = str(tok.get("address") or j or "").strip()
+            if jj:
+                candidates[jj] = tok
+
+    items: List[Dict[str, Any]] = []
+
+    # Pull top movers from dexscreener pair payloads
+    for jetton, tok in candidates.items():
+        if not isinstance(tok, dict):
+            continue
+        pair_id = (tok.get("ston_pool") or tok.get("dedust_pool") or "").strip()
+        if not pair_id:
             continue
 
-        cur_vol = 0.0
-        prev_vol = 0.0
-
-        # events: [[ts:int, ton:float], ...]
-        for e in events:
-            try:
-                ts = int(e[0])
-                ton = float(e[1] or 0.0)
-            except Exception:
-                continue
-
-            age = now - ts
-            if age < 0:
-                continue
-
-            if age <= cur_sec:
-                cur_vol += ton
-            elif age <= (cur_sec + prev_sec):
-                prev_vol += ton
-
-        if cur_vol <= 0:
+        p = pair_lookup_cached(pair_id)
+        if not isinstance(p, dict):
             continue
 
+        base = p.get("baseToken") or {}
+        quote = p.get("quoteToken") or {}
+        base_sym = str(base.get("symbol") or "").upper()
+        quote_sym = str(quote.get("symbol") or "").upper()
 
-        pct = 0.0
-        items.append((cur_vol, sym, tg, pct, str(jetton)))
+        # determine the token side (the non-TON symbol)
+        sym = None
+        if base_sym in ("TON", "WTON", "PTON") and quote_sym:
+            sym = quote_sym
+        elif quote_sym in ("TON", "WTON", "PTON") and base_sym:
+            sym = base_sym
+        else:
+            # not a TON pair
+            sym = str(tok.get("symbol") or "?").strip().upper() or "?"
 
-    # Sort by current volume (desc) and take top-10
-    items.sort(key=lambda x: x[0], reverse=True)
-    top = items[:10]
-    total_cur = sum(x[0] for x in top) if top else 0.0
-
-    def fmt_pct(p: Any) -> str:
+        # price change
+        pc = p.get("priceChange") or {}
+        ch = None
         try:
-            p = float(p)
+            if isinstance(pc, dict):
+                ch = pc.get("h6")
+                if ch is None:
+                    ch = pc.get("h1")
+            if ch is None and isinstance(p.get("priceChangeH6"), (int, float, str)):
+                ch = p.get("priceChangeH6")
         except Exception:
-            p = 0.0
-        if abs(p) < 0.5:
+            ch = None
+
+        try:
+            ch_f = float(ch)
+        except Exception:
+            continue
+
+        tg = str(tok.get("telegram") or "").strip()
+        if not tg:
+            tg = ""
+
+        items.append({
+            "jetton": str(jetton),
+            "sym": sym,
+            "tg": tg,
+            "ch": ch_f,
+        })
+
+    # Dedup by jetton, sort by absolute change
+    dedup: Dict[str, Dict[str, Any]] = {}
+    for it in items:
+        dedup[it["jetton"]] = it
+    top = sorted(dedup.values(), key=lambda x: abs(float(x.get("ch") or 0.0)), reverse=True)[:10]
+
+    def fmt_pct(v: float) -> str:
+        sign = "+" if v > 0 else ""
+        try:
+            return f"{sign}{float(v):.0f}%"
+        except Exception:
             return "0%"
-        # cap extremes for readability
-        if p > 999:
-            p = 999.0
-        if p < -999:
-            p = -999.0
-        s = f"{p:.0f}%"
-        return s
 
-    out: List[str] = []
-    out.append(f"🟢 <b>{h(LEADERBOARD_HEADER_HANDLE)}</b>")
-    out.append("")
+    def sym_link(sym: str, tg: str, jetton: str) -> str:
+        link = tg if (tg and tg.startswith("http")) else f"https://tonviewer.com/jetton/{jetton}"
+        return f"<a href='{h(link)}'>${h(sym)}</a>"
 
-    rank_badges = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
+    nums = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
+
+    text = f"TON TRENDING\n🟢 {h(LEADERBOARD_HEADER_HANDLE)}\n\n"
     if not top:
-        out.append("No data yet — waiting for buys…")
-    else:
-        for i, (cur_vol, sym, tg, pct, jetton) in enumerate(top):
-            badge = rank_badges[i] if i < len(rank_badges) else f"{i+1}."
-            sym_html = h(sym)
+        text += "(No data yet)"
+        return text
 
-            link = tg if tg else f"https://tonviewer.com/jetton/{jetton}"
-            sym_html = f'<a href="{h(link)}">{sym_html}</a>'
+    for i, it in enumerate(top):
+        badge = nums[i] if i < len(nums) else f"{i+1}."
+        text += f"{badge} - {sym_link(it['sym'], it.get('tg') or '', it['jetton'])} | {fmt_pct(it['ch'])}\n"
+        if i == 2:
+            text += "------------------------------\n"
 
-            share = (cur_vol / total_cur * 100.0) if total_cur > 0 else 0.0
-            out.append(f"{badge} - {sym_html} | {fmt_pct(share)}")
-
-            if i == 2 and len(top) > 3:
-                out.append("---------------------------------------------")
-
-    out.append("")
-    out.append("<blockquote>To trend use @SpyTONTrndBot to book trend</blockquote>")
-    return "\n".join(out)
+    return text.strip()
 
 async def leaderboard_loop(app: Application):
     """Create/update a single Top-10 leaderboard message in the trending channel.
@@ -4247,7 +4295,7 @@ async def leaderboard_loop(app: Application):
 
                 log.exception("build_leaderboard_text error: %s", e)
 
-                text = "🟢 <b>%s</b>\n\nNo data yet — waiting for buys…\n\n<blockquote>To trend use @SpyTONTrndBot to book trend</blockquote>" % (LEADERBOARD_HEADER_HANDLE or "@Spytontrending")
+                text = "<b>TON TRENDING</b>\n🟢 <b>%s</b>\n\nNo data yet — waiting for buys…\n\n<blockquote>To trend use @SpyTONTrndBot to book trend</blockquote>" % (LEADERBOARD_HEADER_HANDLE or "@Spytontrending")
 
             # 1) Edit if possible
             if msg_id:
