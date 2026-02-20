@@ -166,13 +166,65 @@ def ensure_ton_leg_for_pool(token: Dict[str, Any]) -> Optional[int]:
     quote = (meta.get("quoteToken") or {})
     base_sym = str(base.get("symbol") or "").upper()
     quote_sym = str(quote.get("symbol") or "").upper()
-    if base_sym in ("TON","WTON"):
+    if base_sym in ("TON","WTON","PTON"):
         token["ton_leg"] = 0
         return 0
-    if quote_sym in ("TON","WTON"):
+    if quote_sym in ("TON","WTON","PTON"):
         token["ton_leg"] = 1
         return 1
     return None
+
+# Treat TON-like wrappers as TON in swap feeds
+TON_LIKE_SYMS = {"TON", "WTON", "PTON", "pTON", "wTON", "wton"}
+
+def ston_event_ton_leg(ev: Dict[str, Any]) -> Optional[int]:
+    """Infer which event leg (0/1) is TON using symbols included in STON export events."""
+    def _sym(v: Any) -> str:
+        if v is None:
+            return ""
+        return str(v).strip()
+
+    s0 = _sym(ev.get("token0Symbol") or ev.get("token0_symbol") or ev.get("symbol0"))
+    s1 = _sym(ev.get("token1Symbol") or ev.get("token1_symbol") or ev.get("symbol1"))
+
+    # Sometimes token0/token1 are dicts
+    if isinstance(ev.get("token0"), dict):
+        s0 = _sym(ev["token0"].get("symbol") or ev["token0"].get("ticker") or s0)
+    if isinstance(ev.get("token1"), dict):
+        s1 = _sym(ev["token1"].get("symbol") or ev["token1"].get("ticker") or s1)
+
+    s0u = s0.upper()
+    s1u = s1.upper()
+    ton_set = {x.upper() for x in TON_LIKE_SYMS}
+    if s0u in ton_set:
+        return 0
+    if s1u in ton_set:
+        return 1
+    return None
+
+def ston_event_is_buy(ev: Dict[str, Any], ton_leg: int):
+    """Return (is_buy, ton_spent, token_received). Sells are ignored (is_buy=False)."""
+    a0_in = _to_float(ev.get("amount0In"))
+    a0_out = _to_float(ev.get("amount0Out"))
+    a1_in = _to_float(ev.get("amount1In"))
+    a1_out = _to_float(ev.get("amount1Out"))
+
+    if ton_leg == 0:
+        # BUY: TON in (leg0), token out (leg1)
+        if a0_in > 0 and a1_out > 0:
+            return True, a0_in, a1_out
+        # SELL would be a1_in > 0 and a0_out > 0 (ignore)
+        return False, 0.0, 0.0
+
+    if ton_leg == 1:
+        # BUY: TON in (leg1), token out (leg0)
+        if a1_in > 0 and a0_out > 0:
+            return True, a1_in, a0_out
+        # SELL would be a0_in > 0 and a1_out > 0 (ignore)
+        return False, 0.0, 0.0
+
+    return False, 0.0, 0.0
+
 
 # -------------------- DEDUST API (for pool discovery + trades) --------------------
 DEDUST_API = os.getenv("DEDUST_API", "https://api.dedust.io").rstrip("/")
@@ -1526,7 +1578,7 @@ def stonfi_extract_buys_from_tonapi_tx(tx: Dict[str, Any], token_addr: str) -> L
             if t == "ton":
                 return True
             sym = str(x.get("symbol") or x.get("ticker") or x.get("name") or "").lower()
-            if sym == "ton":
+            if sym in ("ton","wton","pton"):
                 return True
             # TonAPI sometimes stores ton as a dict without address, but with decimals=9
             if _asset_addr(x) in ("", None) and str(x).lower().find("ton") != -1:
@@ -2706,9 +2758,9 @@ def resolve_jetton_from_text_sync(text: str) -> Optional[str]:
                 quote_sym = str(quote.get("symbol") or "").upper()
                 base_addr = str(base.get("address") or "")
                 quote_addr = str(quote.get("address") or "")
-                if base_sym in ("TON","WTON") and quote_addr:
+                if base_sym in ("TON","WTON","PTON") and quote_addr:
                     return quote_addr
-                if quote_sym in ("TON","WTON") and base_addr:
+                if quote_sym in ("TON","WTON","PTON") and base_addr:
                     return base_addr
         return direct
 
@@ -2739,9 +2791,9 @@ def resolve_jetton_from_text_sync(text: str) -> Optional[str]:
     base_addr = str(base.get("address") or "")
     quote_addr = str(quote.get("address") or "")
     # choose the non-TON side
-    if base_sym in ("TON","WTON") and quote_addr:
+    if base_sym in ("TON","WTON","PTON") and quote_addr:
         return quote_addr
-    if quote_sym in ("TON","WTON") and base_addr:
+    if quote_sym in ("TON","WTON","PTON") and base_addr:
         return base_addr
     # if neither side says TON, still return base (best-effort)
     return base_addr or quote_addr or None
@@ -3199,7 +3251,7 @@ async def poll_once(app: Application):
                 # advance cursor only on successful fetch
                 token["ston_last_block"] = to_b
                 # filter swaps for this pool (STON export feed)
-                ton_leg = ensure_ton_leg_for_pool(token)
+                # ton_leg is determined per-event to avoid base/quote ordering issues
                 posted_any = False
                 for ev in evs:
                     if (str(ev.get("eventType") or "").lower() != "swap"):
@@ -3219,21 +3271,12 @@ async def poll_once(app: Application):
                     a0_out = _to_float(ev.get("amount0Out"))
                     a1_in = _to_float(ev.get("amount1In"))
                     a1_out = _to_float(ev.get("amount1Out"))
-                    ton_spent = 0.0
-                    token_received = 0.0
-                    if ton_leg == 0:
-                        if a0_in > 0 and a1_out > 0:
-                            ton_spent = a0_in
-                            token_received = a1_out
-                        else:
-                            continue
-                    elif ton_leg == 1:
-                        if a1_in > 0 and a0_out > 0:
-                            ton_spent = a1_in
-                            token_received = a0_out
-                        else:
-                            continue
-                    else:
+                    # Determine which leg is TON using event symbols (prevents sells being posted as buys)
+                    ton_leg = ston_event_ton_leg(ev)
+                    if ton_leg is None:
+                        ton_leg = ensure_ton_leg_for_pool(token)
+                    is_buy, ton_spent, token_received = ston_event_is_buy(ev, ton_leg if ton_leg in (0,1) else -1)
+                    if not is_buy:
                         continue
                     if ton_spent < min_buy:
                         continue
@@ -4037,108 +4080,103 @@ async def tracker_loop(app: Application):
 
 # -------------------- Trending Leaderboard (Top-10) --------------------
 def build_leaderboard_text() -> str:
-    """Build a Top-10 leaderboard message (HTML) matching your screenshot style.
+    """Build an organic Top-10 leaderboard message (HTML) similar to the reference style.
 
-    - Ranks by TON buy volume over the last LEADERBOARD_WINDOW_HOURS.
-    - Shows % change vs previous compare window (LEADERBOARD_COMPARE_WINDOW_HOURS).
+    - Ranks tokens by TON buy volume over the last LEADERBOARD_WINDOW_HOURS.
+    - The % column shows share of current-window buy volume.
+    - Token symbols are clickable:
+        - if token telegram link is known -> links to that
+        - else -> links to tonviewer jetton page
     """
     def h(s: Any) -> str:
         return html.escape(str(s or ""))
 
     now = int(time.time())
-    win_sec = int(LEADERBOARD_WINDOW_HOURS * 3600)
+    cur_sec = int(LEADERBOARD_WINDOW_HOURS * 3600)
     prev_sec = int(LEADERBOARD_COMPARE_WINDOW_HOURS * 3600)
 
-    def sum_window(events: List[List[Any]], start_ts: int, end_ts: int) -> float:
-        total = 0.0
-        for e in (events or []):
-            try:
-                ts = int(e[0])
-                v = float(e[1])
-                if start_ts <= ts <= end_ts:
-                    total += v
-            except Exception:
-                continue
-        return total
+    items: List[Tuple[float, str, str, float, str]] = []  # (cur_vol_ton, sym, tg, pct_change, jetton)
 
-    items = []  # (current_vol, sym, pct)
-    for ca, stats in (LEADERBOARD_STATS or {}).items():
+    for jetton, stats in (LEADERBOARD_STATS or {}).items():
         if not isinstance(stats, dict):
             continue
-        sym = (stats.get("symbol") or "TOKEN").strip()
+        sym = str(stats.get("symbol") or "TOKEN")
+        tg = str(stats.get("telegram") or "").strip()
         events = stats.get("events") or []
+        if not isinstance(events, list):
+            continue
 
-        cur_start = now - win_sec
-        cur_vol = sum_window(events, cur_start, now)
+        cur_vol = 0.0
+        prev_vol = 0.0
 
-        prev_end = cur_start
-        prev_start = prev_end - prev_sec
-        prev_vol = sum_window(events, prev_start, prev_end)
+        # events: [[ts:int, ton:float], ...]
+        for e in events:
+            try:
+                ts = int(e[0])
+                ton = float(e[1] or 0.0)
+            except Exception:
+                continue
+
+            age = now - ts
+            if age < 0:
+                continue
+
+            if age <= cur_sec:
+                cur_vol += ton
+            elif age <= (cur_sec + prev_sec):
+                prev_vol += ton
+
+        if cur_vol <= 0:
+            continue
+
 
         pct = 0.0
-        if prev_vol > 0:
-            pct = (cur_vol - prev_vol) / prev_vol * 100.0
+        items.append((cur_vol, sym, tg, pct, str(jetton)))
 
-        if cur_vol > 0 or prev_vol > 0:
-            items.append((cur_vol, sym, pct, stats.get("telegram") or "", ca))
-
+    # Sort by current volume (desc) and take top-10
     items.sort(key=lambda x: x[0], reverse=True)
     top = items[:10]
+    total_cur = sum(x[0] for x in top) if top else 0.0
 
-    def fmt_pct(p: float) -> str:
+    def fmt_pct(p: Any) -> str:
         try:
             p = float(p)
         except Exception:
             p = 0.0
         if abs(p) < 0.5:
             return "0%"
+        # cap extremes for readability
+        if p > 999:
+            p = 999.0
+        if p < -999:
+            p = -999.0
         s = f"{p:.0f}%"
-        if p > 0:
-            s = "+" + s
         return s
-    def _sym_link(sym: str, tg: str, ca: str) -> str:
-        """Return clickable HTML for symbol if we have a telegram/link."""
-        sym_h = h(sym)
-        tg = (tg or "").strip()
-        ca = (ca or "").strip()
-        if not tg:
-            if ca:
-                url = "https://tonviewer.com/jetton/" + ca
-                return f"<a href=\"{h(url)}\"><b>{sym_h}</b></a>"
-            return f"<b>{sym_h}</b>"
-        url = tg
-        if tg.startswith("@"):
-            url = "https://t.me/" + tg[1:]
-        elif tg.startswith("t.me/"):
-            url = "https://" + tg
-        elif tg.startswith("telegram.me/"):
-            url = "https://" + tg
-        elif tg.startswith("http://") or tg.startswith("https://"):
-            url = tg
-        else:
-            return f"<b>{sym_h}</b>"
-        return f"<a href=\"{h(url)}\"><b>{sym_h}</b></a>"
 
     out: List[str] = []
-    out.append("TON TRENDING")
-    out.append(f"🟢 <b>{h(LEADERBOARD_HEADER_HANDLE or '@Spytontrending')}</b>")
+    out.append(f"🟢 <b>{h(LEADERBOARD_HEADER_HANDLE)}</b>")
     out.append("")
 
     rank_badges = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
-
     if not top:
         out.append("No data yet — waiting for buys…")
     else:
-        for i, (_vol, sym, pct, tg, ca) in enumerate(top):
+        for i, (cur_vol, sym, tg, pct, jetton) in enumerate(top):
             badge = rank_badges[i] if i < len(rank_badges) else f"{i+1}."
-            out.append(f"{badge} - {_sym_link(sym, tg, ca)} | {fmt_pct(pct)}")
+            sym_html = h(sym)
+
+            link = tg if tg else f"https://tonviewer.com/jetton/{jetton}"
+            sym_html = f'<a href="{h(link)}">{sym_html}</a>'
+
+            share = (cur_vol / total_cur * 100.0) if total_cur > 0 else 0.0
+            out.append(f"{badge} - {sym_html} | {fmt_pct(share)}")
+
             if i == 2 and len(top) > 3:
                 out.append("---------------------------------------------")
 
     out.append("")
-    out.append(f"<blockquote>To trend use {h(BOOK_TRENDING_URL or '@SpyTONTrndBot')} to book trend</blockquote>")
+    out.append("<blockquote>To trend use @SpyTONTrndBot to book trend</blockquote>")
     return "\n".join(out)
-
 
 async def leaderboard_loop(app: Application):
     """Create/update a single Top-10 leaderboard message in the trending channel.
@@ -4201,7 +4239,15 @@ async def leaderboard_loop(app: Application):
                 except Exception:
                     pass
 
-            text = build_leaderboard_text()
+            try:
+
+                text = build_leaderboard_text()
+
+            except Exception as e:
+
+                log.exception("build_leaderboard_text error: %s", e)
+
+                text = "🟢 <b>%s</b>\n\nNo data yet — waiting for buys…\n\n<blockquote>To trend use @SpyTONTrndBot to book trend</blockquote>" % (LEADERBOARD_HEADER_HANDLE or "@Spytontrending")
 
             # 1) Edit if possible
             if msg_id:
