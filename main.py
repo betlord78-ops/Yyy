@@ -31,13 +31,30 @@ TRENDING_URL = os.getenv("TRENDING_URL", "https://t.me/SpyTonTrending").strip()
 DEFAULT_TOKEN_TG = os.getenv("DEFAULT_TOKEN_TG", "https://t.me/SpyTonEco").strip()
 LISTING_URL = os.getenv("LISTING_URL", "https://t.me/TonProjectListing").strip()
 
+DATA_DIR = os.getenv("DATA_DIR", "").strip()
+def _data_path(p: str) -> str:
+    if not p:
+        return p
+    if DATA_DIR and (not os.path.isabs(p)):
+        return os.path.join(DATA_DIR, p)
+    return p
+if DATA_DIR:
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+    except Exception:
+        pass
+
 # Trending leaderboard (Top-10) message in the trending channel.
 LEADERBOARD_ON = str(os.getenv("LEADERBOARD_ON", "1")).strip().lower() in ("1","true","yes","on")
 LEADERBOARD_INTERVAL = max(30, int(float(os.getenv("LEADERBOARD_INTERVAL", "60"))))
-LEADERBOARD_WINDOW_HOURS = max(1, int(float(os.getenv("LEADERBOARD_WINDOW_HOURS", "24"))))
-LEADERBOARD_STATS_FILE = os.getenv("LEADERBOARD_STATS_FILE", "leaderboard_stats.json")
-LEADERBOARD_MSG_FILE = os.getenv("LEADERBOARD_MSG_FILE", "leaderboard_msg.json")
+LEADERBOARD_WINDOW_HOURS = max(1, int(float(os.getenv("LEADERBOARD_WINDOW_HOURS", "6"))))
+# Used for the % column in the organic leaderboard: compare current window vs previous window.
+LEADERBOARD_COMPARE_WINDOW_HOURS = max(1, int(float(os.getenv("LEADERBOARD_COMPARE_WINDOW_HOURS", str(LEADERBOARD_WINDOW_HOURS)))))
+LEADERBOARD_STATS_FILE = _data_path(os.getenv("LEADERBOARD_STATS_FILE", "leaderboard_stats.json"))
+LEADERBOARD_MSG_FILE = _data_path(os.getenv("LEADERBOARD_MSG_FILE", "leaderboard_msg.json"))
 BOOK_TRENDING_URL = os.getenv("BOOK_TRENDING_URL", "https://t.me/SpyTONTrndBot").strip()
+LEADERBOARD_MESSAGE_ID_STR = os.getenv("LEADERBOARD_MESSAGE_ID", "").strip()  # e.g. 25145
+LEADERBOARD_CHAT_ID_STR = os.getenv("LEADERBOARD_CHAT_ID", "").strip()  # optional; defaults to TRENDING_POST_CHAT_ID
 
 # Optional: mirror *all* buy posts into an official trending/listing channel.
 # Set TRENDING_POST_CHAT_ID to your channel's numeric id (e.g. -100123...).
@@ -47,17 +64,17 @@ MIRROR_TO_TRENDING = str(os.getenv("MIRROR_TO_TRENDING", "0")).strip().lower() i
 
 # Owner-only Ads system
 OWNER_IDS = [int(x) for x in re.split(r"[ ,;]+", os.getenv("OWNER_IDS", "").strip()) if x.strip().isdigit()]
-ADS_FILE = os.getenv("ADS_FILE", "ads_public.json")
+ADS_FILE = _data_path(os.getenv("ADS_FILE", "ads_public.json"))
 DEFAULT_AD_TEXT = os.getenv("DEFAULT_AD_TEXT", "Buy ads on SpyTON — DM @Vseeton").strip()
 DEFAULT_AD_LINK = os.getenv("DEFAULT_AD_LINK", "https://t.me/vseeton").strip()
 GECKO_BASE = os.getenv("GECKO_BASE", "https://api.geckoterminal.com/api/v2").strip().rstrip("/")
 
-DATA_FILE = os.getenv("GROUPS_FILE", "groups_public.json")
-SEEN_FILE = os.getenv("SEEN_FILE", "seen_public.json")
+DATA_FILE = _data_path(os.getenv("GROUPS_FILE", "groups_public.json"))
+SEEN_FILE = _data_path(os.getenv("SEEN_FILE", "seen_public.json"))
 
 # Owner-added tokens that are tracked globally (posted in the trending channel even if no group added the bot).
 # Stored by jetton master address.
-GLOBAL_TOKENS_FILE = os.getenv("GLOBAL_TOKENS_FILE", "tokens_public.json")
+GLOBAL_TOKENS_FILE = _data_path(os.getenv("GLOBAL_TOKENS_FILE", "tokens_public.json"))
 
 # Dexscreener endpoints (used to resolve pool<->token)
 DEX_TOKEN_URL = os.getenv("DEX_TOKEN_URL", "https://api.dexscreener.com/latest/dex/tokens").rstrip("/")
@@ -634,7 +651,13 @@ def _prune_events(events: List[List[Any]], window_sec: int) -> List[List[Any]]:
     return out
 
 def record_buy_for_leaderboard(token: Dict[str, Any], ton_amount: float):
-    """Record a buy into the rolling leaderboard stats."""
+    """Record a buy into the rolling leaderboard stats.
+
+    We keep:
+      - events: rolling TON volume within window (legacy/optional)
+      - mc_series: rolling market cap snapshots (USD) within window (for % change)
+      - mc_usd: latest known market cap (USD) for sorting
+    """
     if not LEADERBOARD_ON:
         return
     try:
@@ -643,21 +666,42 @@ def record_buy_for_leaderboard(token: Dict[str, Any], ton_amount: float):
             return
         sym = str(token.get("symbol") or "").strip() or "TOKEN"
         name = str(token.get("name") or "").strip() or sym
-        window_sec = int(LEADERBOARD_WINDOW_HOURS) * 3600
+        # Keep enough events to compute both current and previous windows.
+        keep_sec = (int(LEADERBOARD_WINDOW_HOURS) + int(LEADERBOARD_COMPARE_WINDOW_HOURS)) * 3600
         tg = str(token.get("telegram") or "").strip()
+
         bucket = LEADERBOARD_STATS.get(jetton)
         if not isinstance(bucket, dict):
-            bucket = {"symbol": sym, "name": name, "telegram": tg, "events": []}
+            bucket = {"symbol": sym, "name": name, "telegram": tg, "events": [], "mc_series": []}
             LEADERBOARD_STATS[jetton] = bucket
+
         bucket["symbol"] = sym
         bucket["name"] = name
         if tg:
             bucket["telegram"] = tg
+
+        # volume (optional)
         events = bucket.get("events")
         if not isinstance(events, list):
             events = []
         events.append([int(time.time()), float(ton_amount or 0.0)])
-        bucket["events"] = _prune_events(events, window_sec)
+        bucket["events"] = _prune_events(events, keep_sec)
+
+        # market cap snapshots (for sorting + % change)
+        mc = token.get("mc_usd")
+        try:
+            mc_val = float(mc) if mc is not None else None
+        except Exception:
+            mc_val = None
+        if mc_val is not None and mc_val > 0:
+            bucket["mc_usd"] = mc_val
+            series = bucket.get("mc_series")
+            if not isinstance(series, list):
+                series = []
+            series.append([int(time.time()), mc_val])
+            # reuse prune helper (expects [ts, val])
+            bucket["mc_series"] = _prune_events(series, keep_sec)
+
         save_leaderboard_stats()
     except Exception:
         return
@@ -3760,25 +3804,63 @@ async def tracker_loop(app: Application):
 
 # -------------------- Trending Leaderboard (Top-10) --------------------
 def build_leaderboard_text() -> str:
-    """Build a Top-10 leaderboard message (HTML) similar to the reference style."""
+    """Build an organic Top-10 leaderboard message (HTML) similar to the reference style.
+
+    - Ranks by TON buy volume over the last LEADERBOARD_WINDOW_HOURS (default 6h).
+    - The % column compares current window vs the previous compare window
+      (LEADERBOARD_COMPARE_WINDOW_HOURS; default equals window).
+    - Does NOT display volume/amounts (matches screenshot style).
+    """
     def h(s: Any) -> str:
         return html.escape(str(s or ""))
 
-    # prune + compute volumes
+    now = int(time.time())
     window_sec = int(LEADERBOARD_WINDOW_HOURS) * 3600
-    items = []
-    for jetton, bucket in (LEADERBOARD_STATS or {}).items():
+    compare_sec = int(LEADERBOARD_COMPARE_WINDOW_HOURS) * 3600
+    keep_sec = window_sec + compare_sec
+
+    items: List[Tuple[float, str, str, float]] = []  # (cur_vol, sym, tg, pct)
+
+    for _jetton, bucket in (LEADERBOARD_STATS or {}).items():
         if not isinstance(bucket, dict):
             continue
-        events = bucket.get("events")
-        if not isinstance(events, list):
-            continue
-        pruned = _prune_events(events, window_sec)
-        bucket["events"] = pruned
-        vol = sum(float(e[1]) for e in pruned if isinstance(e, list) and len(e) >= 2)
+
         sym = str(bucket.get("symbol") or "TOKEN").strip()
         tg = str(bucket.get("telegram") or "").strip()
-        items.append((vol, sym, tg))
+
+        events = bucket.get("events")
+        if not isinstance(events, list):
+            events = []
+
+        # Keep only the last (window+compare) events.
+        pruned = _prune_events(events, keep_sec) if events else []
+        bucket["events"] = pruned
+
+        cur_vol = 0.0
+        prev_vol = 0.0
+        for ts_val in pruned:
+            try:
+                ts = int(ts_val[0])
+                amt = float(ts_val[1])
+            except Exception:
+                continue
+            age = now - ts
+            if age <= window_sec:
+                cur_vol += amt
+            elif age <= keep_sec:
+                prev_vol += amt
+
+        if cur_vol <= 0:
+            continue
+
+        pct = 0.0
+        try:
+            if prev_vol > 0:
+                pct = (cur_vol - prev_vol) / prev_vol * 100.0
+        except Exception:
+            pct = 0.0
+
+        items.append((cur_vol, sym, tg, float(pct)))
 
     # keep stats tidy
     try:
@@ -3789,65 +3871,107 @@ def build_leaderboard_text() -> str:
     items.sort(key=lambda x: x[0], reverse=True)
     top = items[:10]
 
+    def fmt_pct(p: float) -> str:
+        """Readable percent with sign, and stable '0%' rendering."""
+        try:
+            p = float(p)
+        except Exception:
+            return "0%"
+        if abs(p) < 0.5:
+            return "0%"
+        # 0 decimals for big moves, else 0/1 decimals
+        if abs(p) >= 10:
+            s = f"{p:.0f}%"
+        elif abs(p) >= 1:
+            s = f"{p:.0f}%"
+        else:
+            s = f"{p:.1f}%"
+        if not s.startswith("-") and not s.startswith("+"):
+            s = "+" + s
+        return s
+
     # Header
-    lines: List[str] = []
-    # Header (keep it simple as requested)
-    lines.append(f"🟢 <b>SPYTON TRENDING</b>")
-    lines.append("")
+    out: List[str] = []
+    out.append("🟢 <b>@Spytontrending</b>")
+    out.append("")
 
     rank_badges = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
     if not top:
-        lines.append("No data yet — waiting for buys…")
+        out.append("No data yet — waiting for buys…")
     else:
-        for i, (vol, sym, tg) in enumerate(top):
+        for i, (_vol, sym, tg, pct) in enumerate(top):
             badge = rank_badges[i] if i < len(rank_badges) else f"{i+1}."
             sym_html = h(sym)
             if tg:
                 sym_html = f'<a href="{h(tg)}">{sym_html}</a>'
-            lines.append(f"{badge} {sym_html} | {_humanize_num(vol)} | 0%")
+            out.append(f"{badge} - {sym_html} | {fmt_pct(pct)}")
+            if i == 2 and len(top) > 3:
+                out.append("---------------------------------------------")
 
-    lines.append("")
-    # Quote footer (Telegram HTML supports <blockquote>)
-    lines.append(f"<blockquote>To trend use @SpyTONTrndBot to book trend</blockquote>")
-    return "\n".join(lines)
+    out.append("")
+    out.append("<blockquote>To trend use @SpyTONTrndBot to book trend</blockquote>")
+    return "\n".join(out)
 
 
 async def leaderboard_loop(app: Application):
     """Create/update a single Top-10 leaderboard message in the trending channel.
 
-    Anti-spam rules:
-      - Prefer editing an existing message_id (from state file).
-      - If state is missing (e.g. after restart), reuse the pinned leaderboard message if present.
-      - Only send a new message when we are sure the old one doesn't exist / can't be edited.
-      - Never send a new message just because edit failed for a transient reason (rate limits, bad request, etc).
+    - Ranks by buy volume (TON) in the rolling organic window.
+    - Updates ONE fixed message (recommended) to avoid duplicates on redeploy.
+      Set:
+        TRENDING_POST_CHAT_ID = your channel numeric id (-100...)
+        LEADERBOARD_MESSAGE_ID = 25145  (the message to edit)
+      Optionally:
+        LEADERBOARD_CHAT_ID = override chat id (if different from TRENDING_POST_CHAT_ID)
     """
-    if not (LEADERBOARD_ON and TRENDING_POST_CHAT_ID):
+    if not LEADERBOARD_ON:
+        return
+
+    chat_id_str = (LEADERBOARD_CHAT_ID_STR or TRENDING_POST_CHAT_ID or "").strip()
+    if not chat_id_str:
         return
     try:
-        channel_id = int(TRENDING_POST_CHAT_ID)
+        channel_id = int(chat_id_str)
     except Exception:
         return
+
+    fixed_msg_id: Optional[int] = None
+    try:
+        if LEADERBOARD_MESSAGE_ID_STR and LEADERBOARD_MESSAGE_ID_STR.isdigit():
+            fixed_msg_id = int(LEADERBOARD_MESSAGE_ID_STR)
+    except Exception:
+        fixed_msg_id = None
 
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("Ton Listing", url=LISTING_URL)]])
     key = str(channel_id)
 
     while True:
-        # Always reload state so restarts / multiple deploys converge on a single message.
         state = _load_leaderboard_msg_state()
-        msg_id: Optional[int] = None
-        try:
-            msg_id = int(state.get(key) or 0) or None
-        except Exception:
-            msg_id = None
+        msg_id: Optional[int] = fixed_msg_id
 
-        # If we don't have a stored msg_id (common after redeploy on ephemeral FS),
-        # try to reuse the pinned leaderboard message in the channel.
+        # If not fixed, try state file first
         if not msg_id:
+            try:
+                msg_id = int(state.get(key) or 0) or None
+            except Exception:
+                msg_id = None
+
+        # If fixed, persist it into the state file (best-effort)
+        if fixed_msg_id:
+            try:
+                state[key] = int(fixed_msg_id)
+                _save_leaderboard_msg_state(state)
+            except Exception:
+                pass
+
+        # If no stored msg_id (common after redeploy on ephemeral FS),
+        # reuse the pinned leaderboard message in the channel (only when not fixed).
+        if (not fixed_msg_id) and (not msg_id):
             try:
                 chat = await app.bot.get_chat(channel_id)
                 pm = getattr(chat, "pinned_message", None)
                 pm_text = (getattr(pm, "text", None) or getattr(pm, "caption", None) or "") if pm else ""
-                if pm and "SPYTON TRENDING" in pm_text:
+                if pm and ("@Spytontrending" in pm_text or "SPYTON TRENDING" in pm_text):
                     msg_id = int(pm.message_id)
                     state[key] = msg_id
                     _save_leaderboard_msg_state(state)
@@ -3861,7 +3985,7 @@ async def leaderboard_loop(app: Application):
             try:
                 await app.bot.edit_message_text(
                     chat_id=channel_id,
-                    message_id=msg_id,
+                    message_id=int(msg_id),
                     text=text,
                     parse_mode="HTML",
                     disable_web_page_preview=True,
@@ -3875,6 +3999,9 @@ async def leaderboard_loop(app: Application):
                     pass
                 elif "flood" in emsg or "too many requests" in emsg:
                     pass
+                elif fixed_msg_id:
+                    # Fixed message mode: NEVER create a new message.
+                    log.warning("leaderboard edit failed (fixed msg_id=%s): %s", fixed_msg_id, e)
                 # Only recreate when we're sure the message can't be edited / doesn't exist
                 elif ("message to edit not found" in emsg) or ("message can't be edited" in emsg) or ("message_id_invalid" in emsg):
                     try:
@@ -3884,11 +4011,10 @@ async def leaderboard_loop(app: Application):
                         pass
                     msg_id = None
                 else:
-                    # Unknown/transient error: keep msg_id and do NOT spam a new message
                     log.warning("leaderboard edit failed (kept msg_id): %s", e)
 
-        # 2) Send if needed
-        if not msg_id:
+        # 2) Send if needed (ONLY when not in fixed mode)
+        if (not fixed_msg_id) and (not msg_id):
             try:
                 m = await app.bot.send_message(
                     chat_id=channel_id,
@@ -3900,7 +4026,6 @@ async def leaderboard_loop(app: Application):
                 msg_id = int(m.message_id)
                 state[key] = msg_id
                 _save_leaderboard_msg_state(state)
-                # Best-effort pin (requires permissions). Ignore failures.
                 try:
                     await app.bot.pin_chat_message(chat_id=channel_id, message_id=msg_id, disable_notification=True)
                 except Exception:
@@ -3909,8 +4034,6 @@ async def leaderboard_loop(app: Application):
                 log.warning("leaderboard send failed: %s", e)
 
         await asyncio.sleep(LEADERBOARD_INTERVAL)
-
-# -------------------- Chat member welcome --------------------
 async def on_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # when bot added to group, post premium intro
     try:
