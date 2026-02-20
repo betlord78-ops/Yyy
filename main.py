@@ -1509,34 +1509,82 @@ def stonfi_extract_buys_from_tonapi_tx(tx: Dict[str, Any], token_addr: str) -> L
         if dex_name and "ston" not in dex_name:
             continue
 
-        # Try common fields TonAPI uses
-        ton_in = _to_float(aa.get("amount_in") or aa.get("amountIn") or 0)
-        jet_out = _to_float(aa.get("amount_out") or aa.get("amountOut") or 0)
-
         in_asset = aa.get("asset_in") or aa.get("assetIn") or aa.get("in") or {}
         out_asset = aa.get("asset_out") or aa.get("assetOut") or aa.get("out") or {}
 
-        def asset_addr(x):
+        def _asset_addr(x: Any) -> str:
             if isinstance(x, dict):
-                addr = x.get("address") or x.get("master") or x.get("jetton_master") or ""
+                addr = x.get("address") or x.get("master") or x.get("jetton_master") or x.get("jettonMaster") or ""
                 return str(addr)
             return ""
 
-        in_addr = asset_addr(in_asset)
-        out_addr = asset_addr(out_asset)
+        def _is_ton_asset(x: Any) -> bool:
+            if not isinstance(x, dict):
+                return False
+            t = str(x.get("type") or x.get("kind") or x.get("asset_type") or "").lower()
+            if t == "ton":
+                return True
+            sym = str(x.get("symbol") or x.get("ticker") or x.get("name") or "").lower()
+            if sym == "ton":
+                return True
+            # TonAPI sometimes stores ton as a dict without address, but with decimals=9
+            if _asset_addr(x) in ("", None) and str(x).lower().find("ton") != -1:
+                return True
+            return False
 
-        # determine if TON in and token out
-        is_buy = False
-        # TonAPI might represent TON as "TON" or empty addr
-        if out_addr == token_addr and (in_addr == "" or "ton" in str(in_asset).lower()):
-            is_buy = True
-        # sometimes out asset is jetton dict nested
-        if not is_buy:
-            # look inside swap details if present
-            if str(out_addr) == token_addr and ton_in > 0:
-                is_buy = True
+        def _parse_amount(raw: Any, asset: Any) -> Optional[float]:
+            """Handle both already-decimal numbers and raw on-chain integers."""
+            if raw is None:
+                return None
+            # numeric
+            if isinstance(raw, (int, float)):
+                val = float(raw)
+            else:
+                s = str(raw).strip()
+                if not s:
+                    return None
+                # if it looks like an integer string, keep as int-like
+                if s.replace("-", "").isdigit():
+                    try:
+                        val = float(int(s))
+                    except Exception:
+                        val = _to_float(s)
+                else:
+                    val = _to_float(s)
 
-        if not is_buy:
+            # scale if it looks like a raw integer
+            dec = None
+            if isinstance(asset, dict):
+                d = asset.get("decimals")
+                if isinstance(d, int):
+                    dec = d
+                else:
+                    try:
+                        dec = int(d)
+                    except Exception:
+                        dec = None
+
+            if dec is not None:
+                # If we got a big integer-ish value and no decimal point in original, assume raw.
+                raw_s = str(raw).strip() if raw is not None else ""
+                if raw_s and raw_s.replace("-", "").isdigit() and abs(val) >= 10 ** (dec + 2):
+                    val = val / (10 ** dec)
+
+            return val
+
+        in_addr = _asset_addr(in_asset)
+        out_addr = _asset_addr(out_asset)
+
+        amt_in = _parse_amount(aa.get("amount_in") or aa.get("amountIn"), in_asset)
+        amt_out = _parse_amount(aa.get("amount_out") or aa.get("amountOut"), out_asset)
+
+        # BUY must be TON -> token
+        if not (_is_ton_asset(in_asset) and str(out_addr) == str(token_addr)):
+            continue
+
+        ton_in = amt_in
+        jet_out = amt_out
+        if not ton_in or not jet_out:
             continue
 
         buyer = (aa.get("user") or aa.get("sender") or aa.get("initiator") or aa.get("from") or "")
@@ -1547,8 +1595,8 @@ def stonfi_extract_buys_from_tonapi_tx(tx: Dict[str, Any], token_addr: str) -> L
         out.append({
             "tx": tx_hash,
             "buyer": buyer,
-            "ton": ton_in if ton_in else None,
-            "token_amount": jet_out if jet_out else None,
+            "ton": ton_in,
+            "token_amount": jet_out,
         })
 
     return out
@@ -1575,13 +1623,51 @@ def dedust_extract_buys_from_tonapi_event(ev: Dict[str, Any], token_addr: str) -
         if dex_name and "dedust" not in dex_name and "de dust" not in dex_name:
             continue
 
-        # This varies; best-effort
-        ton_in = _to_float(a.get("amount_in") or a.get("amountIn") or a.get("in_amount") or 0)
+        # Normalize swap data: only treat as BUY when TON -> token_addr.
+        in_asset = a.get("asset_in") or a.get("assetIn") or a.get("in") or {}
         out_asset = a.get("asset_out") or a.get("assetOut") or a.get("out") or {}
+        amt_in_raw = a.get("amount_in") or a.get("amountIn") or a.get("in_amount") or a.get("amount") or 0
+        amt_out_raw = a.get("amount_out") or a.get("amountOut") or a.get("out_amount") or 0
+
+        def _is_ton_asset(x: Any) -> bool:
+            if not isinstance(x, dict):
+                return False
+            t = str(x.get("type") or "").lower()
+            sym = str(x.get("symbol") or x.get("ticker") or "").lower()
+            return t == "ton" or sym == "ton"
+
+        def _parse_amount(raw: Any, asset: Any) -> float:
+            s = str(raw).strip()
+            if s == "" or s.lower() in ("none", "null"):
+                return 0.0
+            if "." in s:
+                return _to_float(s)
+            if s.isdigit():
+                dec = 0
+                if isinstance(asset, dict):
+                    try:
+                        dec = int(asset.get("decimals") or 0)
+                    except Exception:
+                        dec = 0
+                try:
+                    return int(s) / (10 ** max(dec, 0))
+                except Exception:
+                    return _to_float(s)
+            return _to_float(s)
+
+        in_is_ton = _is_ton_asset(in_asset)
         out_addr = ""
+        out_symbol = ""
         if isinstance(out_asset, dict):
             out_addr = str(out_asset.get("address") or out_asset.get("master") or "")
-        if out_addr and out_addr != token_addr:
+            out_symbol = str(out_asset.get("symbol") or out_asset.get("ticker") or "")
+
+        if not (in_is_ton and out_addr == token_addr):
+            continue
+
+        ton_in = _parse_amount(amt_in_raw, in_asset)
+        jet_out = _parse_amount(amt_out_raw, out_asset)
+        if ton_in <= 0 or jet_out <= 0:
             continue
 
         buyer = (a.get("user") or a.get("sender") or a.get("initiator") or a.get("from") or "")
@@ -1589,10 +1675,7 @@ def dedust_extract_buys_from_tonapi_event(ev: Dict[str, Any], token_addr: str) -
             buyer = buyer.get("address") or ""
         buyer = str(buyer)
 
-        if ton_in <= 0:
-            continue
-
-        out.append({"tx": tx_hash, "buyer": buyer, "ton": ton_in})
+        out.append({"tx": tx_hash, "buyer": buyer, "ton": ton_in, "token": jet_out, "symbol": out_symbol})
     return out
 
 # -------------------- UI --------------------
@@ -3815,80 +3898,59 @@ def build_leaderboard_text() -> str:
         return html.escape(str(s or ""))
 
     now = int(time.time())
-    window_sec = int(LEADERBOARD_WINDOW_HOURS) * 3600
-    compare_sec = int(LEADERBOARD_COMPARE_WINDOW_HOURS) * 3600
-    keep_sec = window_sec + compare_sec
+    window_sec = int(LEADERBOARD_WINDOW_HOURS * 3600)
 
-    items: List[Tuple[float, str, str, float]] = []  # (cur_vol, sym, tg, pct)
+    # Rank tokens by **current MarketCap** and show % change vs the first MC snapshot in the last 6 hours.
+    items = []  # (current_mc_usd, sym, telegram_link, pct_change)
+    for ca, stats in (board.get("tokens") or {}).items():
+        sym = stats.get("symbol") or "TOKEN"
+        tg = stats.get("telegram") or ""
 
-    for _jetton, bucket in (LEADERBOARD_STATS or {}).items():
-        if not isinstance(bucket, dict):
+        series = stats.get("mc_series") or []
+        if not series:
             continue
 
-        sym = str(bucket.get("symbol") or "TOKEN").strip()
-        tg = str(bucket.get("telegram") or "").strip()
+        # Make sure series is time-ordered
+        series = sorted(series, key=lambda x: x.get("ts", 0))
 
-        events = bucket.get("events")
-        if not isinstance(events, list):
-            events = []
-
-        # Keep only the last (window+compare) events.
-        pruned = _prune_events(events, keep_sec) if events else []
-        bucket["events"] = pruned
-
-        cur_vol = 0.0
-        prev_vol = 0.0
-        for ts_val in pruned:
-            try:
-                ts = int(ts_val[0])
-                amt = float(ts_val[1])
-            except Exception:
-                continue
-            age = now - ts
-            if age <= window_sec:
-                cur_vol += amt
-            elif age <= keep_sec:
-                prev_vol += amt
-
-        if cur_vol <= 0:
+        # Current MC from the latest snapshot (fallback to stored mc_usd)
+        current_mc = float((series[-1].get("mc") if isinstance(series[-1], dict) else 0) or stats.get("mc_usd") or 0)
+        if current_mc <= 0:
             continue
 
-        pct = 0.0
-        try:
-            if prev_vol > 0:
-                pct = (cur_vol - prev_vol) / prev_vol * 100.0
-        except Exception:
+        # Baseline MC = earliest snapshot within the current 6h window
+        baseline_mc = None
+        cutoff = now - window_sec
+        for p in series:
+            ts = int(p.get("ts", 0) or 0)
+            if ts >= cutoff:
+                baseline_mc = float(p.get("mc") or 0)
+                break
+
+        if baseline_mc and baseline_mc > 0:
+            pct = (current_mc - baseline_mc) / baseline_mc * 100.0
+        else:
             pct = 0.0
 
-        items.append((cur_vol, sym, tg, float(pct)))
+        items.append((current_mc, sym, tg, pct))
 
-    # keep stats tidy
-    try:
-        save_leaderboard_stats()
-    except Exception:
-        pass
-
+    # Sort by market cap (desc) and take top-10
     items.sort(key=lambda x: x[0], reverse=True)
     top = items[:10]
 
-    def fmt_pct(p: float) -> str:
-        """Readable percent with sign, and stable '0%' rendering."""
+def fmt_pct(p):
         try:
             p = float(p)
         except Exception:
-            return "0%"
+            p = 0.0
+        # Keep it simple like the reference screenshot: +23%, -20%, 0%
         if abs(p) < 0.5:
             return "0%"
-        # 0 decimals for big moves, else 0/1 decimals
-        if abs(p) >= 10:
-            s = f"{p:.0f}%"
-        elif abs(p) >= 1:
-            s = f"{p:.0f}%"
-        else:
-            s = f"{p:.1f}%"
-        if not s.startswith("-") and not s.startswith("+"):
+        s = f"{p:.0f}%"
+        if p > 0:
             s = "+" + s
         return s
+
 
     # Header
     out: List[str] = []
@@ -3899,12 +3961,12 @@ def build_leaderboard_text() -> str:
     if not top:
         out.append("No data yet — waiting for buys…")
     else:
-        for i, (_vol, sym, tg, pct) in enumerate(top):
+        for i, (mc, sym, tg, pct) in enumerate(top):
             badge = rank_badges[i] if i < len(rank_badges) else f"{i+1}."
             sym_html = h(sym)
             if tg:
                 sym_html = f'<a href="{h(tg)}">{sym_html}</a>'
-            out.append(f"{badge} - {sym_html} | {fmt_pct(pct)}")
+            out.append(f"{badge} - {sym_html} | {fmt_metric(mc)} | {fmt_pct(pct)}")
             if i == 2 and len(top) > 3:
                 out.append("---------------------------------------------")
 
