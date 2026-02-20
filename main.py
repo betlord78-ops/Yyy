@@ -1974,6 +1974,93 @@ async def addtoken_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines.append("\nNotes:\n• Buys will post in the trending channel even if the project didn't add the bot to their group.")
     await update.message.reply_text("\n".join(lines), disable_web_page_preview=True)
 
+
+async def tokens_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner-only: list tokens manually added via /addtoken."""
+    if not is_owner(update.effective_user):
+        return
+
+    if not GLOBAL_TOKENS:
+        await update.message.reply_text("No manually-added tokens yet.")
+        return
+
+    # Sort by symbol for readability
+    items = sorted(GLOBAL_TOKENS.items(), key=lambda kv: (str(kv[1].get("symbol") or ""), kv[0]))
+    lines: List[str] = ["🧾 Manual tokens (added by you):"]
+
+    def _short(addr: str) -> str:
+        if not addr:
+            return "—"
+        return addr[:6] + "..." + addr[-4:]
+
+    for jetton, info in items:
+        sym = str(info.get("symbol") or "TOKEN")
+        tg = str(info.get("telegram") or "").strip()
+        dex = str(info.get("dex") or "—")
+        pool = str(info.get("stonfi_pool") or info.get("dedust_pool") or "")
+
+        # Make symbol clickable to telegram if available
+        if tg.startswith("https://t.me/") or tg.startswith("t.me/"):
+            tg_url = tg if tg.startswith("https://") else "https://" + tg
+            sym_disp = f"<a href=\"{tg_url}\">{html.escape(sym)}</a>"
+        else:
+            sym_disp = html.escape(sym)
+
+        lines.append(f"• {sym_disp} — {html.escape(_short(jetton))} | {html.escape(dex)} | pool: {html.escape(_short(pool))}")
+
+    lines.append("\nDelete: /deltoken <jetton_ca>  (or /delpair <jetton_ca or pool>)")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
+
+async def deltoken_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner-only: remove a manually-added token so it no longer shows in leaderboard/channel."""
+    if not is_owner(update.effective_user):
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: /deltoken <jetton_ca>")
+        return
+
+    jetton = context.args[0].strip()
+    if jetton in GLOBAL_TOKENS:
+        removed = GLOBAL_TOKENS.pop(jetton)
+        save_groups()
+        await update.message.reply_text(f"✅ Removed {removed.get('symbol') or 'token'} ({jetton})")
+        return
+
+    await update.message.reply_text("❌ Token not found in manual list. Use /tokens to see what you added.")
+
+
+async def delpair_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner-only: alias to delete by jetton OR by pool/pair address."""
+    if not is_owner(update.effective_user):
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: /delpair <jetton_ca OR pool_address>")
+        return
+
+    key = context.args[0].strip()
+
+    # Direct jetton match
+    if key in GLOBAL_TOKENS:
+        removed = GLOBAL_TOKENS.pop(key)
+        save_groups()
+        await update.message.reply_text(f"✅ Removed {removed.get('symbol') or 'token'} ({key})")
+        return
+
+    # Try find by pool/pair address
+    for jetton, info in list(GLOBAL_TOKENS.items()):
+        if key == info.get("stonfi_pool") or key == info.get("dedust_pool"):
+            removed = GLOBAL_TOKENS.pop(jetton)
+            save_groups()
+            await update.message.reply_text(
+                f"✅ Removed {removed.get('symbol') or 'token'} (by pool match)\nJetton: {jetton}\nPool: {key}"
+            )
+            return
+
+    await update.message.reply_text("❌ Not found. Use /tokens to see your current manual tokens.")
+
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     if not q:
@@ -4152,6 +4239,10 @@ def main():
 
     application.add_handler(CommandHandler("start", start_cmd))
     application.add_handler(CommandHandler("addtoken", addtoken_cmd))
+    application.add_handler(CommandHandler("tokens", tokens_cmd))
+    application.add_handler(CommandHandler("mytokens", tokens_cmd))
+    application.add_handler(CommandHandler("deltoken", deltoken_cmd))
+    application.add_handler(CommandHandler("delpair", delpair_cmd))
     application.add_handler(CommandHandler("adset", adset_cmd))
     application.add_handler(CommandHandler("adclear", adclear_cmd))
     application.add_handler(CommandHandler("adstatus", adstatus_cmd))
