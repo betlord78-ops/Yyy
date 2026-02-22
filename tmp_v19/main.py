@@ -66,7 +66,7 @@ MIRROR_TO_TRENDING = str(os.getenv("MIRROR_TO_TRENDING", "0")).strip().lower() i
 # Owner-only Ads system
 OWNER_IDS = [int(x) for x in re.split(r"[ ,;]+", os.getenv("OWNER_IDS", "").strip()) if x.strip().isdigit()]
 ADS_FILE = _data_path(os.getenv("ADS_FILE", "ads_public.json"))
-DEFAULT_AD_TEXT = os.getenv("DEFAULT_AD_TEXT", "Buy ads on SpyTON — DM @Vseeton").strip()
+DEFAULT_AD_TEXT = os.getenv("DEFAULT_AD_TEXT", "Advertise here").strip()
 DEFAULT_AD_LINK = os.getenv("DEFAULT_AD_LINK", "https://t.me/vseeton").strip()
 GECKO_BASE = os.getenv("GECKO_BASE", "https://api.geckoterminal.com/api/v2").strip().rstrip("/")
 
