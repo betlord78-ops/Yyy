@@ -3721,6 +3721,25 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
     tx_url = f"https://tonviewer.com/transaction/{tx_hex}" if tx_hex else (f"https://tonviewer.com/transaction/{quote(str(tx))}" if tx else None)
     gt_url = gecko_terminal_pool_url(pair_for_links) if pair_for_links else None
     dex_url = f"https://dexscreener.com/ton/{pair_for_links}" if pair_for_links else None
+
+    # Percent change (best-effort) from Dexscreener (used in trending channel buy line)
+    change_pct = None
+    try:
+        if pair_for_links:
+            _p = _dex_pair_lookup(pair_for_links)
+            if isinstance(_p, dict):
+                _pc = _p.get("priceChange") or {}
+                _ch = None
+                if isinstance(_pc, dict):
+                    _ch = _pc.get("h6")
+                    if _ch is None:
+                        _ch = _pc.get("h1")
+                if _ch is None and isinstance(_p.get("priceChangeH6"), (int, float, str)):
+                    _ch = _p.get("priceChangeH6")
+                if _ch is not None:
+                    change_pct = float(_ch)
+    except Exception:
+        change_pct = None
     # Token telegram button should reflect the token's own link.
     # If not set, hide the button (avoid wrong/static links).
     tg_link = (token.get("telegram") or "").strip()
@@ -3943,73 +3962,94 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
         return "\n".join([b for b in blocks if b is not None])
 
     def build_trending_channel_message() -> str:
-        """Trending channel style (starts with '{TOKEN} Buy!' and no extra header)."""
-        # Header (match requested style: start with Token Buy!)
-        # Header: pipe + token symbol as blue link (matches reference)
+        """Trending channel style (only). Keeps all clickable links, but uses the requested layout."""
+        # Header: | TOKEN Buy! (TOKEN clickable to Telegram when available)
         header_token = tok_symbol or title
-        # Token symbol should be clickable to the token Telegram link (if provided)
         if tg_link:
             header = f'| <a href="{h(tg_link)}"><b>{h(header_token)}</b></a> Buy!'
         elif chart_link:
             header = f'| <a href="{h(chart_link)}"><b>{h(header_token)}</b></a> Buy!'
         else:
             header = f'| <b>{h(header_token)}</b> Buy!'
-        blocks: List[str] = [header]
-        if strength_html:
-            blocks.append("")
-            blocks.append(strength_html)
-        blocks.append("")
-        blocks.append(f"💎 <b>{ton_amt:,.2f} TON</b>{h(usd_disp)}")
-        if got_line:
-            blocks.append(got_line.replace("🪙", "🪙"))
 
-        # Buyer line with New Holder label
-        buyer_line3 = buyer_html
+        # Checkmark strength line (static like your example)
+        checks = "✅" * 26
+
+        # Token amount line with 🔀 and clickable symbol (if TG exists)
+        token_line = ""
+        if tok_amt and tok_symbol:
+            sym_html = h(tok_symbol)
+            if tg_link:
+                sym_html = f'<a href="{h(tg_link)}">{h(tok_symbol)}</a>'
+            try:
+                tok_amt_f = float(tok_amt)
+                token_line = f'🔀 <b>{h(fmt_token_amount(tok_amt_f))} {sym_html}</b>'
+            except Exception:
+                token_line = f'🔀 <b>{h(tok_amt)} {sym_html}</b>'
+
+        # Holders compact (1.17K, 2.3M)
+        def _fmt_compact_int(n: Optional[int]) -> str:
+            if n is None:
+                return "—"
+            try:
+                x = float(n)
+            except Exception:
+                return "—"
+            if x >= 1_000_000:
+                return f"{x/1_000_000:.2f}".rstrip("0").rstrip(".") + "M"
+            if x >= 1_000:
+                return f"{x/1_000:.2f}".rstrip("0").rstrip(".") + "K"
+            return f"{int(x):,}"
+
+        holders_compact = _fmt_compact_int(int(holders) if holders is not None else None)
+        holders_line_ch = f"🔀 {h(holders_compact)} Holders"
+
+        # Buyer line (wallet clickable) + change % (h6/h1) + Txn clickable
+        buyer_html2 = h(buyer_short)
         if buyer_url:
-            buyer_line3 = f'<a href="{h(buyer_url)}">{buyer_html}</a>'
-        if tx_url:
-            if is_new_buyer:
-                buyer_line3 = f"{buyer_line3}: <b>New Holder!</b> | <a href=\"{h(tx_url)}\">Txn</a>"
-            else:
-                buyer_line3 = f"{buyer_line3} | <a href=\"{h(tx_url)}\">Txn</a>"
-        blocks.append("")
-        blocks.append(f"👤 {buyer_line3}")
-
-        # Stats order (Holders, Liquidity, MCap) like the reference image
-        blocks.append("")
-        blocks.append(f"👥 Holders: {h(f'{int(holders):,}' if holders is not None else '—')}")
-
-        # Liquidity (show placeholder instead of dropping the line)
-        if liq_usd is not None:
+            buyer_html2 = f'<a href="{h(buyer_url)}">{buyer_html2}</a>'
+        pct_part = ""
+        if isinstance(change_pct, (int, float)):
             try:
-                lv = float(liq_usd)
-                liq_disp = f"${lv/1000:,.2f}K" if lv >= 1000 else f"${lv:,.0f}"
+                v = float(change_pct)
+                sign = "+" if v > 0 else ""
+                pct_part = f": {sign}{v:.1f}%"
             except Exception:
-                liq_disp = fmt_usd(liq_usd, 0) or "—"
-        else:
-            liq_disp = "—"
-        blocks.append(f"💧 Liquidity: {h(liq_disp)}")
+                pct_part = ""
+        txn_part = f' | <a href="{h(tx_url)}">Txn</a>' if tx_url else " | Txn"
+        buyer_line_ch = f"👤 {buyer_html2}{pct_part}{txn_part}"
 
-        # MarketCap (show placeholder instead of dropping the line)
-        if mc_usd is not None:
+        # Price + MarketCap
+        price_line = "💵 Price: —"
+        if price_usd is not None:
             try:
-                mv = float(mc_usd)
-                m_disp = f"${mv/1_000_000:,.2f}M" if mv >= 1_000_000 else (f"${mv/1000:,.2f}K" if mv >= 1000 else f"${mv:,.0f}")
+                price_line = f"💵 Price: ${float(price_usd):,.6f}"
             except Exception:
-                m_disp = fmt_usd(mc_usd, 0) or "—"
-        else:
-            m_disp = "—"
-        blocks.append(f"📊 MCap: {h(m_disp)}")
+                price_line = "💵 Price: —"
+        mc_line_ch = f"💵 MarketCap: {h(fmt_usd(mc_usd, 0) or '—')}"
 
+        # Links row: Listing | Buy | Chart (all clickable)
+        listing_part = f'💎 <a href="{h(LISTING_URL)}">Listing</a>' if LISTING_URL else "💎 Listing"
+        buy_part = f'🐸 <a href="{h(buy_url)}">Buy</a>' if buy_url else "🐸 Buy"
+        chart_part = f'📊 <a href="{h(chart_link)}">Chart</a>' if chart_link else "📊 Chart"
+        links_row = " | ".join([p for p in [listing_part, buy_part, chart_part] if p])
+
+        blocks: List[str] = []
+        blocks.append(header)
         blocks.append("")
-        # Links row (Chart | Trending | DTrade) — no COC in channel style
-        chart_part_ch = f"📈 <a href=\"{h(chart_link)}\">Chart</a>" if chart_link else "📈 Chart"
-        trending_part_ch = f"🔥 <a href=\"{h(trending)}\">Trending</a>" if trending else "🔥 Trending"
-        dtrade_part_ch = dtrade_part
-        blocks.append(" | ".join([p for p in [chart_part_ch, trending_part_ch, dtrade_part_ch] if p]))
+        blocks.append(checks)
+        blocks.append("")
+        blocks.append(f" ꘜ  {ton_amt:,.2f} TON{h(usd_disp)}")
+        if token_line:
+            blocks.append(token_line)
+        blocks.append(holders_line_ch)
+        blocks.append(buyer_line_ch)
+        blocks.append(price_line)
+        blocks.append(mc_line_ch)
+        blocks.append("")
+        blocks.append(links_row)
         blocks.append(ad_line)
         return "\n".join([b for b in blocks if b is not None])
-
     def is_trending_dest(dest_chat_id: int) -> bool:
         return bool(TRENDING_POST_CHAT_ID and str(dest_chat_id) == str(TRENDING_POST_CHAT_ID))
 
