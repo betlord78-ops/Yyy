@@ -73,6 +73,8 @@ GECKO_BASE = os.getenv("GECKO_BASE", "https://api.geckoterminal.com/api/v2").str
 DATA_FILE = _data_path(os.getenv("GROUPS_FILE", "groups_public.json"))
 SEEN_FILE = _data_path(os.getenv("SEEN_FILE", "seen_public.json"))
 
+USER_PREFS_FILE = _data_path(os.getenv("USER_PREFS_FILE", "user_prefs_public.json"))
+
 # Owner-added tokens that are tracked globally (posted in the trending channel even if no group added the bot).
 # Stored by jetton master address.
 GLOBAL_TOKENS_FILE = _data_path(os.getenv("GLOBAL_TOKENS_FILE", "tokens_public.json"))
@@ -602,6 +604,103 @@ def _save_json(path: str, obj):
 
 GROUPS: Dict[str, Any] = _load_json(DATA_FILE, {})  # chat_id -> config
 SEEN: Dict[str, Any] = _load_json(SEEN_FILE, {})    # chat_id -> {dedupe_key: ts}
+USER_PREFS: Dict[str, Any] = _load_json(USER_PREFS_FILE, {})  # user_id -> {"lang": "en"|"ru"}
+# -------------------- I18N (EN/RU) --------------------
+I18N: Dict[str, Dict[str, str]] = {
+  "en": {
+    "btn_add_group": "➕ Add BuyBot to Group",
+    "btn_cfg_token": "⚙️ Configure Token",
+    "btn_settings": "🛠 Settings",
+    "btn_support": "🆘 Support",
+    "btn_language": "🌐 Language",
+    "lang_title": "Choose language / Выберите язык",
+    "lang_en": "🇬🇧 English",
+    "lang_ru": "🇷🇺 Russian",
+    "start_title": "🚀 *SpyTON BuyBot*",
+    "start_desc": "Premium buy alerts for STON.fi + DeDust (TON).\n\n• Add to a group\n• Configure token in 10 seconds\n• Clean buy posts + ads support\n\nUse the buttons below:",
+    "connected_title": "✅ *SpyTON BuyBot connected*",
+    "connected_desc": "Now send the token CA here in DM.\nI will auto-detect *STON.fi* / *DeDust* pools and start posting buys in your group.\n\nTip: you can also include the token Telegram link in the same message.\nExample:\n`<CA> https://t.me/YourToken`",
+    "lang_set_ok": "Language saved: English ✅",
+    "lang_set_ok_ru": "Language saved: Russian ✅",
+    "need_admin": "Admins only.",
+    "wiz_paste_title": "🛰 SpyTON Setup — Paste Token CA",
+    "wiz_paste_hint": "STON.fi / DeDust will be auto-detected.",
+    "wiz_found_title": "🔎 Token found",
+    "wiz_confirm": "✅ Confirm",
+    "wiz_edit": "✏️ Edit",
+    "wiz_cancel": "❌ Cancel",
+    "wiz_control_title": "🎛 Mission Control",
+    "wiz_tab_basics": "⚙️ Basics",
+    "wiz_tab_display": "👁 Display",
+    "wiz_tab_links": "🔗 Links",
+    "wiz_done": "✅ Done",
+  },
+  "ru": {
+    "btn_add_group": "➕ Добавить BuyBot в группу",
+    "btn_cfg_token": "⚙️ Настроить токен",
+    "btn_settings": "🛠 Настройки",
+    "btn_support": "🆘 Поддержка",
+    "btn_language": "🌐 Язык",
+    "lang_title": "Выберите язык / Choose language",
+    "lang_en": "🇬🇧 English",
+    "lang_ru": "🇷🇺 Русский",
+    "start_title": "🚀 *SpyTON BuyBot*",
+    "start_desc": "Премиум-уведомления о покупках для STON.fi + DeDust (TON).\n\n• Добавьте в группу\n• Настройте токен за 10 секунд\n• Чистые buy-посты + поддержка рекламы\n\nИспользуйте кнопки ниже:",
+    "connected_title": "✅ *SpyTON BuyBot подключён*",
+    "connected_desc": "Теперь отправьте сюда в ЛС адрес токена (CA).\nЯ автоматически найду пулы *STON.fi* / *DeDust* и начну постить покупки в вашей группе.\n\nСовет: можно добавить ссылку на Telegram токена в том же сообщении.\nПример:\n`<CA> https://t.me/YourToken`",
+    "lang_set_ok": "Язык сохранён: English ✅",
+    "lang_set_ok_ru": "Язык сохранён: Русский ✅",
+    "need_admin": "Только для админов.",
+    "wiz_paste_title": "🛰 Настройка SpyTON — отправьте CA",
+    "wiz_paste_hint": "Пулы STON.fi / DeDust будут найдены автоматически.",
+    "wiz_found_title": "🔎 Токен найден",
+    "wiz_confirm": "✅ Подтвердить",
+    "wiz_edit": "✏️ Изменить",
+    "wiz_cancel": "❌ Отмена",
+    "wiz_control_title": "🎛 Панель управления",
+    "wiz_tab_basics": "⚙️ Основное",
+    "wiz_tab_display": "👁 Отображение",
+    "wiz_tab_links": "🔗 Ссылки",
+    "wiz_done": "✅ Готово",
+  }
+}
+
+def _get_user_lang(user_id: Optional[int]) -> str:
+    if not user_id:
+        return "en"
+    u = USER_PREFS.get(str(user_id), {}) if isinstance(USER_PREFS, dict) else {}
+    lang = (u.get("lang") or "en").lower()
+    return "ru" if lang.startswith("ru") else "en"
+
+def _get_group_lang(chat_id: Optional[int], user_id: Optional[int] = None) -> str:
+    if chat_id is None:
+        return _get_user_lang(user_id)
+    g = GROUPS.get(str(chat_id), {}) if isinstance(GROUPS, dict) else {}
+    lang = (g.get("lang") or "").lower()
+    if lang:
+        return "ru" if lang.startswith("ru") else "en"
+    return _get_user_lang(user_id)
+
+def t(key: str, lang: str, **kwargs) -> str:
+    lang = "ru" if str(lang).lower().startswith("ru") else "en"
+    s = I18N.get(lang, {}).get(key) or I18N["en"].get(key) or key
+    try:
+        return s.format(**kwargs)
+    except Exception:
+        return s
+
+def set_user_lang(user_id: int, lang: str):
+    lang = "ru" if str(lang).lower().startswith("ru") else "en"
+    USER_PREFS[str(user_id)] = {"lang": lang}
+    _save_json(USER_PREFS_FILE, USER_PREFS)
+
+def set_group_lang(chat_id: int, lang: str):
+    lang = "ru" if str(lang).lower().startswith("ru") else "en"
+    cfg = GROUPS.get(str(chat_id), {}) or {}
+    cfg["lang"] = lang
+    GROUPS[str(chat_id)] = cfg
+    _save_json(DATA_FILE, GROUPS)
+
 
 # Global tokens tracked for the trending channel (owner-only /addtoken)
 GLOBAL_TOKENS: Dict[str, Any] = _load_json(GLOBAL_TOKENS_FILE, {})  # jetton_addr -> token dict
@@ -1759,29 +1858,23 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if group_id:
                     # Auto-detect mode: user sends CA, we resolve STON.fi + DeDust pools automatically.
                     AWAITING[update.effective_user.id] = {"group_id": group_id, "stage": "CA", "dex": "both"}
+                    lang = _get_user_lang(update.effective_user.id if update.effective_user else None)
                     await update.message.reply_text(
-                        "✅ *SpyTON BuyBot connected*\n\n"
-                        "Now send the token CA here in DM.\n"
-                        "I will auto-detect *STON.fi* / *DeDust* pools and start posting buys in your group.\n\n"
-                        "Tip: you can also include the token Telegram link in the same message.\n"
-                        "Example:\n`<CA> https://t.me/YourToken`",
+                        "*" + t("wiz_paste_title", lang) + "*\n" + t("wiz_paste_hint", lang) + "\n\n" + "`<CA> https://t.me/YourToken`",
                         parse_mode="Markdown"
                     )
                     return
         add_url = await build_add_to_group_url(context.application)
+        lang = _get_user_lang(update.effective_user.id if update.effective_user else None)
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("➕ Add BuyBot to Group", url=add_url)],
-            [InlineKeyboardButton("⚙️ Configure Token", callback_data="CFG_PRIVATE")],
-            [InlineKeyboardButton("🛠 Settings", callback_data="SET_PRIVATE")],
-            [InlineKeyboardButton("🆘 Support", url="https://t.me/SpyTonEco")],
+            [InlineKeyboardButton(t("btn_add_group", lang), url=add_url)],
+            [InlineKeyboardButton(t("btn_cfg_token", lang), callback_data="CFG_PRIVATE")],
+            [InlineKeyboardButton(t("btn_settings", lang), callback_data="SET_PRIVATE")],
+            [InlineKeyboardButton(t("btn_language", lang), callback_data="LANG_PRIVATE")],
+            [InlineKeyboardButton(t("btn_support", lang), url="https://t.me/SpyTonEco")],
         ])
         await update.message.reply_text(
-            "🚀 *SpyTON BuyBot*\n"
-            "Premium buy alerts for STON.fi + DeDust (TON).\n\n"
-            "• Add to a group\n"
-            "• Configure token in 10 seconds\n"
-            "• Clean buy posts + ads support\n\n"
-            "Use the buttons below:",
+            t("start_title", lang) + "\n" + t("start_desc", lang),
             reply_markup=kb,
             parse_mode="Markdown"
         )
@@ -1801,6 +1894,18 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
+
+async def lang_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    user = update.effective_user
+    if not chat or not user:
+        return
+    lang = _get_group_lang(chat.id, user.id)
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(t("lang_en", lang), callback_data="LANG_SET_en")],
+        [InlineKeyboardButton(t("lang_ru", lang), callback_data="LANG_SET_ru")],
+    ])
+    await update.message.reply_text(t("lang_title", lang), reply_markup=kb)
 
 async def adset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Owner-only: /adset 24h | Your ad text | https://yourlink"""
@@ -2125,6 +2230,97 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     data = q.data or ""
+
+    # ---- SpyTON Wizard (Mission Control) ----
+    if data in ("WZ_CANCEL","WZ_EDIT","WZ_CONFIRM") or data.startswith("WZ_TAB_") or data == "WZ_DONE":
+        lang = _get_user_lang(user.id)
+        cfg = AWAITING.get(user.id) or {}
+        pending = cfg.get("pending") if isinstance(cfg, dict) else None
+        pending = pending if isinstance(pending, dict) else {}
+
+        if data == "WZ_CANCEL":
+            AWAITING.pop(user.id, None)
+            await q.edit_message_text("Cancelled." if lang=="en" else "Отменено.")
+            return
+
+        if data == "WZ_EDIT":
+            # Back to paste step
+            if isinstance(cfg, dict):
+                cfg["stage"] = "CA"
+                cfg.pop("pending", None)
+                AWAITING[user.id] = cfg
+            await q.edit_message_text("*"+t("wiz_paste_title", lang)+"*\\n"+t("wiz_paste_hint", lang)+"\\n\\n`<CA> https://t.me/YourToken`", parse_mode="Markdown")
+            return
+
+        if data == "WZ_CONFIRM":
+            group_id = int(cfg.get("group_id") or 0) if isinstance(cfg, dict) else 0
+            addr = pending.get("addr")
+            tg_url = pending.get("tg") or ""
+            dex_mode = pending.get("dex") or "both"
+            if not group_id or not addr:
+                await q.edit_message_text("Missing data. Please /start again." if lang=="en" else "Нет данных. Нажмите /start заново.")
+                return
+
+            await configure_group_token(group_id, addr, context, reply_to_chat=user.id, telegram=tg_url, dex_mode=dex_mode)
+
+            # Mission Control tabs (reuse existing token settings UI)
+            if isinstance(cfg, dict):
+                cfg["stage"] = "CONTROL"
+                AWAITING[user.id] = cfg
+
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton(t("wiz_tab_basics", lang), callback_data="WZ_TAB_basics"),
+                 InlineKeyboardButton(t("wiz_tab_display", lang), callback_data="WZ_TAB_display"),
+                 InlineKeyboardButton(t("wiz_tab_links", lang), callback_data="WZ_TAB_links")],
+                [InlineKeyboardButton(t("wiz_done", lang), callback_data="WZ_DONE")]
+            ])
+            await q.edit_message_text(t("wiz_control_title", lang), reply_markup=kb)
+            return
+
+        if data.startswith("WZ_TAB_"):
+            # Open existing token settings panel (safe and already powerful)
+            group_id = int(cfg.get("group_id") or 0) if isinstance(cfg, dict) else 0
+            if not group_id:
+                await q.answer()
+                return
+            await send_token_settings(update, context, group_id)
+            return
+
+        if data == "WZ_DONE":
+            await q.edit_message_text("✅ Done. Bot is live in your group." if lang=="en" else "✅ Готово. Бот работает в вашей группе.")
+            return
+
+
+# ---- Language selector ----
+    # ---- Language selector ----
+    if data == "LANG_PRIVATE":
+        lang = _get_user_lang(user.id)
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(t("lang_en", lang), callback_data="LANG_SET_en")],
+            [InlineKeyboardButton(t("lang_ru", lang), callback_data="LANG_SET_ru")],
+        ])
+        await q.edit_message_text(t("lang_title", lang), reply_markup=kb)
+        return
+
+    if data.startswith("LANG_SET_"):
+        lang_code = data.split("_", 2)[2] if "_" in data else "en"
+        set_user_lang(user.id, lang_code)
+        new_lang = _get_user_lang(user.id)
+        try:
+            await q.answer(t("lang_set_ok_ru", new_lang) if new_lang=="ru" else t("lang_set_ok", new_lang), show_alert=False)
+        except Exception:
+            pass
+        add_url = await build_add_to_group_url(context.application)
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(t("btn_add_group", new_lang), url=add_url)],
+            [InlineKeyboardButton(t("btn_cfg_token", new_lang), callback_data="CFG_PRIVATE")],
+            [InlineKeyboardButton(t("btn_settings", new_lang), callback_data="SET_PRIVATE")],
+            [InlineKeyboardButton(t("btn_language", new_lang), callback_data="LANG_PRIVATE")],
+            [InlineKeyboardButton(t("btn_support", new_lang), url="https://t.me/SpyTonEco")],
+        ])
+        await q.edit_message_text(t("start_title", new_lang) + "\n" + t("start_desc", new_lang), reply_markup=kb, parse_mode="Markdown")
+        return
+
     if data in ("CFG_PRIVATE","SET_PRIVATE"):
         # In private we configure a target group via last used group in AWAITING or ask user to do it in group
         await q.edit_message_text(
@@ -2906,6 +3102,49 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # If user pressed configure, it's this chat anyway
         target_chat_id = chat.id
         dex_mode = "both"
+
+    
+    # --- Wizard confirm step (DM only) ---
+    if chat.type == "private":
+        cfg = AWAITING.get(user.id)
+        if isinstance(cfg, dict) and cfg.get("stage") == "CA":
+            lang = _get_user_lang(user.id)
+            # Preview token details (same sources as setup)
+            gk = gecko_token_info(addr)
+            name = (gk.get("name") or "").strip() if gk else ""
+            sym = (gk.get("symbol") or "").strip() if gk else ""
+            holders = None
+            if gk and isinstance(gk.get("holders"), (int, float)):
+                holders = int(gk.get("holders"))
+            if not name and not sym:
+                info = tonapi_jetton_info(addr)
+                name = (info.get("name") or "").strip()
+                sym = (info.get("symbol") or "").strip()
+                holders = holders if holders is not None else info.get("holders")
+            if holders is None:
+                try:
+                    info2 = tonapi_jetton_info(addr)
+                    holders = info2.get("holders")
+                except Exception:
+                    holders = None
+
+            cfg["stage"] = "CONFIRM"
+            cfg["pending"] = {"addr": addr, "tg": tg_url or "", "dex": dex_mode, "name": name, "sym": sym, "holders": holders}
+            AWAITING[user.id] = cfg
+
+            details = f"{t('wiz_found_title', lang)}\n\n" \
+                      f"Name: {name or '—'}\n" \
+                      f"Symbol: {sym or '—'}\n" \
+                      f"Holders: {holders if holders is not None else '—'}\n\n" \
+                      f"CA: `{addr}`"
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton(t("wiz_confirm", lang), callback_data="WZ_CONFIRM")],
+                [InlineKeyboardButton(t("wiz_edit", lang), callback_data="WZ_EDIT"),
+                 InlineKeyboardButton(t("wiz_cancel", lang), callback_data="WZ_CANCEL")],
+            ])
+            await update.message.reply_text(details, reply_markup=kb, parse_mode="Markdown")
+            return
+
 
     await configure_group_token(target_chat_id, addr, context, reply_to_chat=chat.id, telegram=tg_url, dex_mode=dex_mode)
     # Clear awaiting state after successful input
@@ -4447,6 +4686,7 @@ def main():
     application = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
 
     application.add_handler(CommandHandler("start", start_cmd))
+    application.add_handler(CommandHandler("lang", lang_cmd))
     application.add_handler(CommandHandler("addtoken", addtoken_cmd))
     application.add_handler(CommandHandler("tokens", tokens_cmd))
     application.add_handler(CommandHandler("mytokens", tokens_cmd))
