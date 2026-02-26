@@ -1518,7 +1518,36 @@ def find_pair_for_token_on_dex(token_address: str, want_dex: str) -> Optional[st
         return None
 
 def find_stonfi_ton_pair_for_token(token_address: str) -> Optional[str]:
-    return find_pair_for_token_on_dex(token_address, "stonfi")
+    # 1) Try DexScreener token pairs (fast, but can miss brand new / low-liquidity pools)
+    pair = find_pair_for_token_on_dex(token_address, "stonfi")
+    if pair:
+        return pair
+
+    # 2) Fallback to STON.fi official API: pools/by_market with canonical TON address
+    # Docs: https://api.ston.fi  GET /v1/pools/by_market/{asset0}/{asset1}
+    # Canonical TON address: EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c
+    base = "https://api.ston.fi"
+    ton = "EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c"
+    try:
+        for a0, a1 in [(token_address, ton), (ton, token_address)]:
+            url = f"{base}/v1/pools/by_market/{a0}/{a1}"
+            r = requests.get(url, timeout=20)
+            if r.status_code != 200:
+                continue
+            js = r.json()
+            # API may return {'pools':[...]} or a list
+            pools = js.get("pools") if isinstance(js, dict) else js
+            if not isinstance(pools, list) or not pools:
+                continue
+            # pick first pool (usually best match)
+            p0 = pools[0]
+            if isinstance(p0, dict):
+                addr = (p0.get("address") or p0.get("pool_address") or "").strip()
+                if addr:
+                    return addr
+    except Exception:
+        pass
+    return None
 
 
 def dex_token_info(token_address: str) -> Dict[str, str]:
