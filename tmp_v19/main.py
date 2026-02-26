@@ -98,25 +98,6 @@ DEX_TOKEN_URL = os.getenv("DEX_TOKEN_URL", "https://api.dexscreener.com/latest/d
 DEX_PAIR_URL = os.getenv("DEX_PAIR_URL", "https://api.dexscreener.com/latest/dex/pairs").rstrip("/")
 
 
-def normalize_ca(text: str) -> str:
-    """Extract and normalize a TON jetton master address from messy input.
-    Handles multiline pastes and trailing '-' / suffixes like '-Lone'.
-    """
-    if not text:
-        return ""
-    # remove whitespace/newlines
-    merged = re.sub(r"\s+", "", str(text)).strip()
-
-    # candidates like EQ... / UQ...
-    candidates = re.findall(r"[EU][A-Za-z0-9_-]{47,60}", merged)
-    for cand in candidates:
-        c = cand.rstrip("-")
-        # strip suffix like -Lone if pasted glued (rare)
-        c = re.sub(r"-[A-Za-z]{2,12}$", "", c)
-        if re.fullmatch(r"[EU][A-Za-z0-9_-]{47,60}", c):
-            return c
-    return candidates[0].rstrip("-") if candidates else ""
-
 # -------------------- STON API (exported events) --------------------
 STON_BASE = os.getenv("STON_BASE", "https://api.ston.fi").rstrip("/")
 STON_LATEST_BLOCK_URL = f"{STON_BASE}/export/dexscreener/v1/latest-block"
@@ -3035,10 +3016,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Resolve either a jetton address or a supported link (GT / DexScreener / STON / DeDust)
-    addr = normalize_ca(text)
-    if not addr:
-        await update.message.reply_text('Invalid token CA. Please paste the jetton master address.' if _get_user_lang(user.id)=='en' else 'Неверный CA. Вставьте master-адрес jetton.')
-        return
+    addr = await _to_thread(resolve_jetton_from_text_sync, text)
     if not addr:
         return
 
