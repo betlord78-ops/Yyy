@@ -2863,47 +2863,34 @@ async def send_status(chat_id: int, context: ContextTypes.DEFAULT_TYPE, msg):
 def detect_token_address(text: str) -> Optional[str]:
     """Extract a TON user-friendly address from arbitrary text.
 
-    Users often paste addresses together with extra suffixes (e.g. "-Lone") or links.
-    TON user-friendly base64url addresses are 48 chars long (EQ.. / UQ..).
-    We normalize to the canonical 48-char form so pool lookup doesn't fail.
+    Handles common messy pastes:
+      - multiline addresses
+      - trailing '-' at the end
+      - suffixes like '-Lone'
+      - extra links after the address
+
+    TON user-friendly base64url addresses are typically 48 chars long and start with EQ/UQ.
     """
     m = JETTON_RE.search(text or "")
     if not m:
         return None
     cand = (m.group(1) or "").strip()
-    # Canonical TON user-friendly address length is 48.
-    if len(cand) >= 48:
+
+    # Remove obvious trailing junk (common from other bots)
+    cand = re.sub(r"[\s\.,;:]+$", "", cand)
+    cand = cand.rstrip("-")
+    cand = re.sub(r"-[A-Za-z]{2,12}$", "", cand)  # e.g. -Lone
+
+    # If longer than 48, take the first 48 AFTER cleaning
+    if len(cand) > 48:
         cand = cand[:48]
+
     # Final sanity: must start with EQ/UQ and be urlsafe-base64-ish
     if not (cand.startswith("EQ") or cand.startswith("UQ")):
         return None
     if not re.fullmatch(r"[A-Za-z0-9_-]{48}", cand):
         return None
     return cand
-
-def _dex_pair_lookup(pair_id: str) -> Optional[Dict[str, Any]]:
-    """Return Dexscreener pair payload (TON) for a given pair/pool id."""
-    pair_id = (pair_id or "").strip()
-    if not pair_id:
-        return None
-    url = f"{DEX_PAIR_URL}/ton/{pair_id}"
-    try:
-        res = requests.get(url, timeout=20)
-        if res.status_code != 200:
-            return None
-        js = res.json()
-        pairs = js.get("pair") or js.get("pairs")
-        if isinstance(pairs, list) and pairs:
-            return pairs[0] if isinstance(pairs[0], dict) else None
-        if isinstance(pairs, dict):
-            return pairs
-        # Some responses use "pairs" list
-        if isinstance(js.get("pairs"), list) and js.get("pairs"):
-            p0 = js.get("pairs")[0]
-            return p0 if isinstance(p0, dict) else None
-        return None
-    except Exception:
-        return None
 
 def resolve_jetton_from_text_sync(text: str) -> Optional[str]:
     """Resolve a jetton master address from either a jetton address or supported pool/link."""
