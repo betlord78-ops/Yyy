@@ -1486,7 +1486,7 @@ def find_pair_for_token_on_dex(token_address: str, want_dex: str) -> Optional[st
             quote = p.get("quoteToken") or {}
             base_sym = (base.get("symbol") or "").upper()
             quote_sym = (quote.get("symbol") or "").upper()
-            if base_sym not in ("TON","WTON") and quote_sym not in ("TON","WTON"):
+            if base_sym not in ("TON","WTON","PTON") and quote_sym not in ("TON","WTON","PTON"):
                 continue
 
             pair_id = (p.get("pairAddress") or p.get("pairId") or p.get("pair") or "").strip()
@@ -1517,37 +1517,113 @@ def find_pair_for_token_on_dex(token_address: str, want_dex: str) -> Optional[st
     except Exception:
         return None
 
+_STON_ASSETS_CACHE: Dict[str, str] = {}
+
+def _ston_assets_map() -> Dict[str, str]:
+    """Map symbol->asset address from STON.fi API (best-effort)."""
+    global _STON_ASSETS_CACHE
+    if _STON_ASSETS_CACHE:
+        return _STON_ASSETS_CACHE
+    try:
+        r = requests.get("https://api.ston.fi/v1/assets", timeout=20)
+        if r.status_code != 200:
+            return _STON_ASSETS_CACHE
+        js = r.json()
+        assets = js.get("assets") if isinstance(js, dict) else js
+        if not isinstance(assets, list):
+            return _STON_ASSETS_CACHE
+        m: Dict[str, str] = {}
+        for a in assets:
+            if not isinstance(a, dict):
+                continue
+            sym = str(a.get("symbol") or "").upper().strip()
+            addr = str(a.get("address") or "").strip()
+            if sym and addr:
+                m[sym] = addr
+        _STON_ASSETS_CACHE = m
+        return _STON_ASSETS_CACHE
+    except Exception:
+        return _STON_ASSETS_CACHE
+
+def _ston_try_markets(token_address: str, other_assets: List[str]) -> Optional[str]:
+    base = "https://api.ston.fi"
+    try:
+        for other in other_assets:
+            for a0, a1 in [(token_address, other), (other, token_address)]:
+                url = f"{base}/v1/pools/by_market/{a0}/{a1}"
+                r = requests.get(url, timeout=20)
+                if r.status_code != 200:
+                    continue
+                js = r.json()
+                pools = js.get("pools") if isinstance(js, dict) else js
+                if not isinstance(pools, list) or not pools:
+                    continue
+                p0 = pools[0]
+                if isinstance(p0, dict):
+                    addr = (p0.get("address") or p0.get("pool_address") or "").strip()
+                    if addr:
+                        return addr
+    except Exception:
+        pass
+    return None
+
 def find_stonfi_ton_pair_for_token(token_address: str) -> Optional[str]:
-    # 1) Try DexScreener token pairs (fast, but can miss brand new / low-liquidity pools)
+    # 1) Try DexScreener token pairs
     pair = find_pair_for_token_on_dex(token_address, "stonfi")
     if pair:
         return pair
 
-    # 2) Fallback to STON.fi official API: pools/by_market with canonical TON address
-    # Docs: https://api.ston.fi  GET /v1/pools/by_market/{asset0}/{asset1}
-    # Canonical TON address: EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c
-    base = "https://api.ston.fi"
-    ton = "EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c"
+    # 2) Try STON.fi official API markets against TON/WTON/PTON assets if known
+    assets = _ston_assets_map()
+    other_assets = []
+    # fallback canonical TON address if assets map missing
+    if assets.get("TON"):
+        other_assets.append(assets["TON"])
+    else:
+        other_assets.append("EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c")
+
+    if assets.get("WTON"):
+        other_assets.append(assets["WTON"])
+    if assets.get("PTON"):
+        other_assets.append(assets["PTON"])
+
+    pool = _ston_try_markets(token_address, other_assets)
+    if pool:
+        return pool
+
+    # 3) As a last resort, if token is paired with something else (USDT etc), just pick best stonfi pool from DexScreener
     try:
-        for a0, a1 in [(token_address, ton), (ton, token_address)]:
-            url = f"{base}/v1/pools/by_market/{a0}/{a1}"
-            r = requests.get(url, timeout=20)
-            if r.status_code != 200:
+        url = f"{DEX_TOKEN_URL}/{token_address}"
+        res = requests.get(url, timeout=20)
+        if res.status_code != 200:
+            return None
+        js = res.json()
+        pairs = js.get("pairs") if isinstance(js, dict) else None
+        if not isinstance(pairs, list):
+            return None
+        best = None
+        best_score = -1.0
+        for p in pairs:
+            if not isinstance(p, dict):
                 continue
-            js = r.json()
-            # API may return {'pools':[...]} or a list
-            pools = js.get("pools") if isinstance(js, dict) else js
-            if not isinstance(pools, list) or not pools:
+            dex_id = (p.get("dexId") or "").lower()
+            chain_id = (p.get("chainId") or "").lower()
+            if chain_id != "ton":
                 continue
-            # pick first pool (usually best match)
-            p0 = pools[0]
-            if isinstance(p0, dict):
-                addr = (p0.get("address") or p0.get("pool_address") or "").strip()
-                if addr:
-                    return addr
+            if "ston" not in dex_id:
+                continue
+            pair_id = (p.get("pairAddress") or p.get("pairId") or p.get("pair") or "").strip()
+            if not pair_id:
+                continue
+            liq = float((p.get("liquidity") or {}).get("usd") or 0.0)
+            vol = float((p.get("volume") or {}).get("h24") or 0.0)
+            score = liq + 0.25 * vol
+            if score > best_score:
+                best_score = score
+                best = pair_id
+        return best
     except Exception:
-        pass
-    return None
+        return None
 
 
 def dex_token_info(token_address: str) -> Dict[str, str]:
@@ -1583,7 +1659,7 @@ def dex_token_info(token_address: str) -> Dict[str, str]:
             quote = p.get("quoteToken") or {}
             base_sym = (base.get("symbol") or "").upper()
             quote_sym = (quote.get("symbol") or "").upper()
-            if base_sym not in ("TON","WTON") and quote_sym not in ("TON","WTON"):
+            if base_sym not in ("TON","WTON","PTON") and quote_sym not in ("TON","WTON","PTON"):
                 continue
             liq = 0.0
             vol = 0.0
