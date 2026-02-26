@@ -72,6 +72,20 @@ GECKO_BASE = os.getenv("GECKO_BASE", "https://api.geckoterminal.com/api/v2").str
 
 DATA_FILE = _data_path(os.getenv("GROUPS_FILE", "groups_public.json"))
 SEEN_FILE = _data_path(os.getenv("SEEN_FILE", "seen_public.json"))
+# -------------------- AMOUNT HELPERS --------------------
+NANO = 10**9
+
+def ensure_ton_amount(v: float) -> float:
+    """Heuristic: convert nanoton to TON if value looks like nanoton."""
+    try:
+        x = float(v)
+    except Exception:
+        return 0.0
+    # Anything absurdly large is likely nanoton.
+    if x > 1e6:
+        return x / NANO
+    return x
+
 
 USER_PREFS_FILE = _data_path(os.getenv("USER_PREFS_FILE", "user_prefs_public.json"))
 
@@ -1860,7 +1874,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     AWAITING[update.effective_user.id] = {"group_id": group_id, "stage": "CA", "dex": "both"}
                     lang = _get_user_lang(update.effective_user.id if update.effective_user else None)
                     await update.message.reply_text(
-                        "*" + t("wiz_paste_title", lang) + "*\n" + t("wiz_paste_hint", lang) + "\n\n" + "`<CA> https://t.me/YourToken`",
+                        t("connected_title", lang) + "\n\n" + t("connected_desc", lang),
                         parse_mode="Markdown"
                     )
                     return
@@ -2230,69 +2244,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     data = q.data or ""
-
-    # ---- SpyTON Wizard (Mission Control) ----
-    if data in ("WZ_CANCEL","WZ_EDIT","WZ_CONFIRM") or data.startswith("WZ_TAB_") or data == "WZ_DONE":
-        lang = _get_user_lang(user.id)
-        cfg = AWAITING.get(user.id) or {}
-        pending = cfg.get("pending") if isinstance(cfg, dict) else None
-        pending = pending if isinstance(pending, dict) else {}
-
-        if data == "WZ_CANCEL":
-            AWAITING.pop(user.id, None)
-            await q.edit_message_text("Cancelled." if lang=="en" else "Отменено.")
-            return
-
-        if data == "WZ_EDIT":
-            # Back to paste step
-            if isinstance(cfg, dict):
-                cfg["stage"] = "CA"
-                cfg.pop("pending", None)
-                AWAITING[user.id] = cfg
-            await q.edit_message_text("*"+t("wiz_paste_title", lang)+"*\\n"+t("wiz_paste_hint", lang)+"\\n\\n`<CA> https://t.me/YourToken`", parse_mode="Markdown")
-            return
-
-        if data == "WZ_CONFIRM":
-            group_id = int(cfg.get("group_id") or 0) if isinstance(cfg, dict) else 0
-            addr = pending.get("addr")
-            tg_url = pending.get("tg") or ""
-            dex_mode = pending.get("dex") or "both"
-            if not group_id or not addr:
-                await q.edit_message_text("Missing data. Please /start again." if lang=="en" else "Нет данных. Нажмите /start заново.")
-                return
-
-            await configure_group_token(group_id, addr, context, reply_to_chat=user.id, telegram=tg_url, dex_mode=dex_mode)
-
-            # Mission Control tabs (reuse existing token settings UI)
-            if isinstance(cfg, dict):
-                cfg["stage"] = "CONTROL"
-                AWAITING[user.id] = cfg
-
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton(t("wiz_tab_basics", lang), callback_data="WZ_TAB_basics"),
-                 InlineKeyboardButton(t("wiz_tab_display", lang), callback_data="WZ_TAB_display"),
-                 InlineKeyboardButton(t("wiz_tab_links", lang), callback_data="WZ_TAB_links")],
-                [InlineKeyboardButton(t("wiz_done", lang), callback_data="WZ_DONE")]
-            ])
-            await q.edit_message_text(t("wiz_control_title", lang), reply_markup=kb)
-            return
-
-        if data.startswith("WZ_TAB_"):
-            # Open existing token settings panel (safe and already powerful)
-            group_id = int(cfg.get("group_id") or 0) if isinstance(cfg, dict) else 0
-            if not group_id:
-                await q.answer()
-                return
-            await send_token_settings(update, context, group_id)
-            return
-
-        if data == "WZ_DONE":
-            await q.edit_message_text("✅ Done. Bot is live in your group." if lang=="en" else "✅ Готово. Бот работает в вашей группе.")
-            return
-
-
-# ---- Language selector ----
-    # ---- Language selector ----
     if data == "LANG_PRIVATE":
         lang = _get_user_lang(user.id)
         kb = InlineKeyboardMarkup([
@@ -3102,50 +3053,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # If user pressed configure, it's this chat anyway
         target_chat_id = chat.id
         dex_mode = "both"
-
-    
-    # --- Wizard confirm step (DM only) ---
-    if chat.type == "private":
-        cfg = AWAITING.get(user.id)
-        if isinstance(cfg, dict) and cfg.get("stage") == "CA":
-            lang = _get_user_lang(user.id)
-            # Preview token details (same sources as setup)
-            gk = gecko_token_info(addr)
-            name = (gk.get("name") or "").strip() if gk else ""
-            sym = (gk.get("symbol") or "").strip() if gk else ""
-            holders = None
-            if gk and isinstance(gk.get("holders"), (int, float)):
-                holders = int(gk.get("holders"))
-            if not name and not sym:
-                info = tonapi_jetton_info(addr)
-                name = (info.get("name") or "").strip()
-                sym = (info.get("symbol") or "").strip()
-                holders = holders if holders is not None else info.get("holders")
-            if holders is None:
-                try:
-                    info2 = tonapi_jetton_info(addr)
-                    holders = info2.get("holders")
-                except Exception:
-                    holders = None
-
-            cfg["stage"] = "CONFIRM"
-            cfg["pending"] = {"addr": addr, "tg": tg_url or "", "dex": dex_mode, "name": name, "sym": sym, "holders": holders}
-            AWAITING[user.id] = cfg
-
-            details = f"{t('wiz_found_title', lang)}\n\n" \
-                      f"Name: {name or '—'}\n" \
-                      f"Symbol: {sym or '—'}\n" \
-                      f"Holders: {holders if holders is not None else '—'}\n\n" \
-                      f"CA: `{addr}`"
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton(t("wiz_confirm", lang), callback_data="WZ_CONFIRM")],
-                [InlineKeyboardButton(t("wiz_edit", lang), callback_data="WZ_EDIT"),
-                 InlineKeyboardButton(t("wiz_cancel", lang), callback_data="WZ_CANCEL")],
-            ])
-            await update.message.reply_text(details, reply_markup=kb, parse_mode="Markdown")
-            return
-
-
     await configure_group_token(target_chat_id, addr, context, reply_to_chat=chat.id, telegram=tg_url, dex_mode=dex_mode)
     # Clear awaiting state after successful input
     if chat.type == "private":
