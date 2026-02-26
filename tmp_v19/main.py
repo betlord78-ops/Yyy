@@ -72,20 +72,6 @@ GECKO_BASE = os.getenv("GECKO_BASE", "https://api.geckoterminal.com/api/v2").str
 
 DATA_FILE = _data_path(os.getenv("GROUPS_FILE", "groups_public.json"))
 SEEN_FILE = _data_path(os.getenv("SEEN_FILE", "seen_public.json"))
-# -------------------- AMOUNT HELPERS --------------------
-NANO = 10**9
-
-def ensure_ton_amount(v: float) -> float:
-    """Heuristic: convert nanoton to TON if value looks like nanoton."""
-    try:
-        x = float(v)
-    except Exception:
-        return 0.0
-    # Anything absurdly large is likely nanoton.
-    if x > 1e6:
-        return x / NANO
-    return x
-
 
 USER_PREFS_FILE = _data_path(os.getenv("USER_PREFS_FILE", "user_prefs_public.json"))
 
@@ -97,25 +83,6 @@ GLOBAL_TOKENS_FILE = _data_path(os.getenv("GLOBAL_TOKENS_FILE", "tokens_public.j
 DEX_TOKEN_URL = os.getenv("DEX_TOKEN_URL", "https://api.dexscreener.com/latest/dex/tokens").rstrip("/")
 DEX_PAIR_URL = os.getenv("DEX_PAIR_URL", "https://api.dexscreener.com/latest/dex/pairs").rstrip("/")
 
-
-def normalize_ca(text: str) -> str:
-    """Extract and normalize a TON jetton master address from messy input.
-    Handles multiline pastes and trailing '-' / suffixes like '-Lone'.
-    """
-    if not text:
-        return ""
-    # remove whitespace/newlines
-    merged = re.sub(r"\s+", "", str(text)).strip()
-
-    # candidates like EQ... / UQ...
-    candidates = re.findall(r"[EU][A-Za-z0-9_-]{47,60}", merged)
-    for cand in candidates:
-        c = cand.rstrip("-")
-        # strip suffix like -Lone if pasted glued (rare)
-        c = re.sub(r"-[A-Za-z]{2,12}$", "", c)
-        if re.fullmatch(r"[EU][A-Za-z0-9_-]{47,60}", c):
-            return c
-    return candidates[0].rstrip("-") if candidates else ""
 
 # -------------------- STON API (exported events) --------------------
 STON_BASE = os.getenv("STON_BASE", "https://api.ston.fi").rstrip("/")
@@ -1486,7 +1453,7 @@ def find_pair_for_token_on_dex(token_address: str, want_dex: str) -> Optional[st
             quote = p.get("quoteToken") or {}
             base_sym = (base.get("symbol") or "").upper()
             quote_sym = (quote.get("symbol") or "").upper()
-            if base_sym not in ("TON","WTON","PTON") and quote_sym not in ("TON","WTON","PTON"):
+            if base_sym not in ("TON","WTON") and quote_sym not in ("TON","WTON"):
                 continue
 
             pair_id = (p.get("pairAddress") or p.get("pairId") or p.get("pair") or "").strip()
@@ -1517,113 +1484,8 @@ def find_pair_for_token_on_dex(token_address: str, want_dex: str) -> Optional[st
     except Exception:
         return None
 
-_STON_ASSETS_CACHE: Dict[str, str] = {}
-
-def _ston_assets_map() -> Dict[str, str]:
-    """Map symbol->asset address from STON.fi API (best-effort)."""
-    global _STON_ASSETS_CACHE
-    if _STON_ASSETS_CACHE:
-        return _STON_ASSETS_CACHE
-    try:
-        r = requests.get("https://api.ston.fi/v1/assets", timeout=20)
-        if r.status_code != 200:
-            return _STON_ASSETS_CACHE
-        js = r.json()
-        assets = js.get("assets") if isinstance(js, dict) else js
-        if not isinstance(assets, list):
-            return _STON_ASSETS_CACHE
-        m: Dict[str, str] = {}
-        for a in assets:
-            if not isinstance(a, dict):
-                continue
-            sym = str(a.get("symbol") or "").upper().strip()
-            addr = str(a.get("address") or "").strip()
-            if sym and addr:
-                m[sym] = addr
-        _STON_ASSETS_CACHE = m
-        return _STON_ASSETS_CACHE
-    except Exception:
-        return _STON_ASSETS_CACHE
-
-def _ston_try_markets(token_address: str, other_assets: List[str]) -> Optional[str]:
-    base = "https://api.ston.fi"
-    try:
-        for other in other_assets:
-            for a0, a1 in [(token_address, other), (other, token_address)]:
-                url = f"{base}/v1/pools/by_market/{a0}/{a1}"
-                r = requests.get(url, timeout=20)
-                if r.status_code != 200:
-                    continue
-                js = r.json()
-                pools = js.get("pools") if isinstance(js, dict) else js
-                if not isinstance(pools, list) or not pools:
-                    continue
-                p0 = pools[0]
-                if isinstance(p0, dict):
-                    addr = (p0.get("address") or p0.get("pool_address") or "").strip()
-                    if addr:
-                        return addr
-    except Exception:
-        pass
-    return None
-
 def find_stonfi_ton_pair_for_token(token_address: str) -> Optional[str]:
-    # 1) Try DexScreener token pairs
-    pair = find_pair_for_token_on_dex(token_address, "stonfi")
-    if pair:
-        return pair
-
-    # 2) Try STON.fi official API markets against TON/WTON/PTON assets if known
-    assets = _ston_assets_map()
-    other_assets = []
-    # fallback canonical TON address if assets map missing
-    if assets.get("TON"):
-        other_assets.append(assets["TON"])
-    else:
-        other_assets.append("EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c")
-
-    if assets.get("WTON"):
-        other_assets.append(assets["WTON"])
-    if assets.get("PTON"):
-        other_assets.append(assets["PTON"])
-
-    pool = _ston_try_markets(token_address, other_assets)
-    if pool:
-        return pool
-
-    # 3) As a last resort, if token is paired with something else (USDT etc), just pick best stonfi pool from DexScreener
-    try:
-        url = f"{DEX_TOKEN_URL}/{token_address}"
-        res = requests.get(url, timeout=20)
-        if res.status_code != 200:
-            return None
-        js = res.json()
-        pairs = js.get("pairs") if isinstance(js, dict) else None
-        if not isinstance(pairs, list):
-            return None
-        best = None
-        best_score = -1.0
-        for p in pairs:
-            if not isinstance(p, dict):
-                continue
-            dex_id = (p.get("dexId") or "").lower()
-            chain_id = (p.get("chainId") or "").lower()
-            if chain_id != "ton":
-                continue
-            if "ston" not in dex_id:
-                continue
-            pair_id = (p.get("pairAddress") or p.get("pairId") or p.get("pair") or "").strip()
-            if not pair_id:
-                continue
-            liq = float((p.get("liquidity") or {}).get("usd") or 0.0)
-            vol = float((p.get("volume") or {}).get("h24") or 0.0)
-            score = liq + 0.25 * vol
-            if score > best_score:
-                best_score = score
-                best = pair_id
-        return best
-    except Exception:
-        return None
+    return find_pair_for_token_on_dex(token_address, "stonfi")
 
 
 def dex_token_info(token_address: str) -> Dict[str, str]:
@@ -1659,7 +1521,7 @@ def dex_token_info(token_address: str) -> Dict[str, str]:
             quote = p.get("quoteToken") or {}
             base_sym = (base.get("symbol") or "").upper()
             quote_sym = (quote.get("symbol") or "").upper()
-            if base_sym not in ("TON","WTON","PTON") and quote_sym not in ("TON","WTON","PTON"):
+            if base_sym not in ("TON","WTON") and quote_sym not in ("TON","WTON"):
                 continue
             liq = 0.0
             vol = 0.0
@@ -1998,7 +1860,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     AWAITING[update.effective_user.id] = {"group_id": group_id, "stage": "CA", "dex": "both"}
                     lang = _get_user_lang(update.effective_user.id if update.effective_user else None)
                     await update.message.reply_text(
-                        t("connected_title", lang) + "\n\n" + t("connected_desc", lang),
+                        "*" + t("wiz_paste_title", lang) + "*\n" + t("wiz_paste_hint", lang) + "\n\n" + "`<CA> https://t.me/YourToken`",
                         parse_mode="Markdown"
                     )
                     return
@@ -2368,6 +2230,69 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     data = q.data or ""
+
+    # ---- SpyTON Wizard (Mission Control) ----
+    if data in ("WZ_CANCEL","WZ_EDIT","WZ_CONFIRM") or data.startswith("WZ_TAB_") or data == "WZ_DONE":
+        lang = _get_user_lang(user.id)
+        cfg = AWAITING.get(user.id) or {}
+        pending = cfg.get("pending") if isinstance(cfg, dict) else None
+        pending = pending if isinstance(pending, dict) else {}
+
+        if data == "WZ_CANCEL":
+            AWAITING.pop(user.id, None)
+            await q.edit_message_text("Cancelled." if lang=="en" else "Отменено.")
+            return
+
+        if data == "WZ_EDIT":
+            # Back to paste step
+            if isinstance(cfg, dict):
+                cfg["stage"] = "CA"
+                cfg.pop("pending", None)
+                AWAITING[user.id] = cfg
+            await q.edit_message_text("*"+t("wiz_paste_title", lang)+"*\\n"+t("wiz_paste_hint", lang)+"\\n\\n`<CA> https://t.me/YourToken`", parse_mode="Markdown")
+            return
+
+        if data == "WZ_CONFIRM":
+            group_id = int(cfg.get("group_id") or 0) if isinstance(cfg, dict) else 0
+            addr = pending.get("addr")
+            tg_url = pending.get("tg") or ""
+            dex_mode = pending.get("dex") or "both"
+            if not group_id or not addr:
+                await q.edit_message_text("Missing data. Please /start again." if lang=="en" else "Нет данных. Нажмите /start заново.")
+                return
+
+            await configure_group_token(group_id, addr, context, reply_to_chat=user.id, telegram=tg_url, dex_mode=dex_mode)
+
+            # Mission Control tabs (reuse existing token settings UI)
+            if isinstance(cfg, dict):
+                cfg["stage"] = "CONTROL"
+                AWAITING[user.id] = cfg
+
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton(t("wiz_tab_basics", lang), callback_data="WZ_TAB_basics"),
+                 InlineKeyboardButton(t("wiz_tab_display", lang), callback_data="WZ_TAB_display"),
+                 InlineKeyboardButton(t("wiz_tab_links", lang), callback_data="WZ_TAB_links")],
+                [InlineKeyboardButton(t("wiz_done", lang), callback_data="WZ_DONE")]
+            ])
+            await q.edit_message_text(t("wiz_control_title", lang), reply_markup=kb)
+            return
+
+        if data.startswith("WZ_TAB_"):
+            # Open existing token settings panel (safe and already powerful)
+            group_id = int(cfg.get("group_id") or 0) if isinstance(cfg, dict) else 0
+            if not group_id:
+                await q.answer()
+                return
+            await send_token_settings(update, context, group_id)
+            return
+
+        if data == "WZ_DONE":
+            await q.edit_message_text("✅ Done. Bot is live in your group." if lang=="en" else "✅ Готово. Бот работает в вашей группе.")
+            return
+
+
+# ---- Language selector ----
+    # ---- Language selector ----
     if data == "LANG_PRIVATE":
         lang = _get_user_lang(user.id)
         kb = InlineKeyboardMarkup([
@@ -2968,34 +2893,47 @@ async def send_status(chat_id: int, context: ContextTypes.DEFAULT_TYPE, msg):
 def detect_token_address(text: str) -> Optional[str]:
     """Extract a TON user-friendly address from arbitrary text.
 
-    Handles common messy pastes:
-      - multiline addresses
-      - trailing '-' at the end
-      - suffixes like '-Lone'
-      - extra links after the address
-
-    TON user-friendly base64url addresses are typically 48 chars long and start with EQ/UQ.
+    Users often paste addresses together with extra suffixes (e.g. "-Lone") or links.
+    TON user-friendly base64url addresses are 48 chars long (EQ.. / UQ..).
+    We normalize to the canonical 48-char form so pool lookup doesn't fail.
     """
     m = JETTON_RE.search(text or "")
     if not m:
         return None
     cand = (m.group(1) or "").strip()
-
-    # Remove obvious trailing junk (common from other bots)
-    cand = re.sub(r"[\s\.,;:]+$", "", cand)
-    cand = cand.rstrip("-")
-    cand = re.sub(r"-[A-Za-z]{2,12}$", "", cand)  # e.g. -Lone
-
-    # If longer than 48, take the first 48 AFTER cleaning
-    if len(cand) > 48:
+    # Canonical TON user-friendly address length is 48.
+    if len(cand) >= 48:
         cand = cand[:48]
-
     # Final sanity: must start with EQ/UQ and be urlsafe-base64-ish
     if not (cand.startswith("EQ") or cand.startswith("UQ")):
         return None
     if not re.fullmatch(r"[A-Za-z0-9_-]{48}", cand):
         return None
     return cand
+
+def _dex_pair_lookup(pair_id: str) -> Optional[Dict[str, Any]]:
+    """Return Dexscreener pair payload (TON) for a given pair/pool id."""
+    pair_id = (pair_id or "").strip()
+    if not pair_id:
+        return None
+    url = f"{DEX_PAIR_URL}/ton/{pair_id}"
+    try:
+        res = requests.get(url, timeout=20)
+        if res.status_code != 200:
+            return None
+        js = res.json()
+        pairs = js.get("pair") or js.get("pairs")
+        if isinstance(pairs, list) and pairs:
+            return pairs[0] if isinstance(pairs[0], dict) else None
+        if isinstance(pairs, dict):
+            return pairs
+        # Some responses use "pairs" list
+        if isinstance(js.get("pairs"), list) and js.get("pairs"):
+            p0 = js.get("pairs")[0]
+            return p0 if isinstance(p0, dict) else None
+        return None
+    except Exception:
+        return None
 
 def resolve_jetton_from_text_sync(text: str) -> Optional[str]:
     """Resolve a jetton master address from either a jetton address or supported pool/link."""
@@ -3127,10 +3065,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Resolve either a jetton address or a supported link (GT / DexScreener / STON / DeDust)
-    addr = normalize_ca(text)
-    if not addr:
-        await update.message.reply_text('Invalid token CA. Please paste the jetton master address.' if _get_user_lang(user.id)=='en' else 'Неверный CA. Вставьте master-адрес jetton.')
-        return
+    addr = await _to_thread(resolve_jetton_from_text_sync, text)
     if not addr:
         return
 
@@ -3167,6 +3102,50 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # If user pressed configure, it's this chat anyway
         target_chat_id = chat.id
         dex_mode = "both"
+
+    
+    # --- Wizard confirm step (DM only) ---
+    if chat.type == "private":
+        cfg = AWAITING.get(user.id)
+        if isinstance(cfg, dict) and cfg.get("stage") == "CA":
+            lang = _get_user_lang(user.id)
+            # Preview token details (same sources as setup)
+            gk = gecko_token_info(addr)
+            name = (gk.get("name") or "").strip() if gk else ""
+            sym = (gk.get("symbol") or "").strip() if gk else ""
+            holders = None
+            if gk and isinstance(gk.get("holders"), (int, float)):
+                holders = int(gk.get("holders"))
+            if not name and not sym:
+                info = tonapi_jetton_info(addr)
+                name = (info.get("name") or "").strip()
+                sym = (info.get("symbol") or "").strip()
+                holders = holders if holders is not None else info.get("holders")
+            if holders is None:
+                try:
+                    info2 = tonapi_jetton_info(addr)
+                    holders = info2.get("holders")
+                except Exception:
+                    holders = None
+
+            cfg["stage"] = "CONFIRM"
+            cfg["pending"] = {"addr": addr, "tg": tg_url or "", "dex": dex_mode, "name": name, "sym": sym, "holders": holders}
+            AWAITING[user.id] = cfg
+
+            details = f"{t('wiz_found_title', lang)}\n\n" \
+                      f"Name: {name or '—'}\n" \
+                      f"Symbol: {sym or '—'}\n" \
+                      f"Holders: {holders if holders is not None else '—'}\n\n" \
+                      f"CA: `{addr}`"
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton(t("wiz_confirm", lang), callback_data="WZ_CONFIRM")],
+                [InlineKeyboardButton(t("wiz_edit", lang), callback_data="WZ_EDIT"),
+                 InlineKeyboardButton(t("wiz_cancel", lang), callback_data="WZ_CANCEL")],
+            ])
+            await update.message.reply_text(details, reply_markup=kb, parse_mode="Markdown")
+            return
+
+
     await configure_group_token(target_chat_id, addr, context, reply_to_chat=chat.id, telegram=tg_url, dex_mode=dex_mode)
     # Clear awaiting state after successful input
     if chat.type == "private":
