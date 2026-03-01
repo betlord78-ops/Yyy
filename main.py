@@ -2976,17 +2976,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await is_admin(context.bot, target_chat_id, user.id):
             AWAITING_CUSTOM_EMOJI.pop(user.id, None)
             return
-        # If user sent Telegram Premium custom emoji directly, capture its custom_emoji_id.
         raw = (update.message.text or "").strip()
-        try:
-            ents = update.message.entities or []
-            for e in ents:
-                if getattr(e, "type", None) == "custom_emoji" and getattr(e, "custom_emoji_id", None):
-                    ceid = str(e.custom_emoji_id)
-                    raw = f'<tg-emoji emoji-id="{ceid}"></tg-emoji>'
-                    break
-        except Exception:
-            pass
         # light validation: allow a single emoji or a <tg-emoji> HTML snippet
         if len(raw) > 180:
             await update.message.reply_text("Emoji text too long. Send a single emoji or a <tg-emoji ...> tag.")
@@ -4231,6 +4221,21 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
     async def _send(dest_chat_id: int):
         kb = build_buy_keyboard(int(dest_chat_id))
         local_msg = build_trending_channel_message() if is_trending_dest(int(dest_chat_id)) else build_group_message()
+
+        # --- Premium emoji bar for trending channel (entities-based, reliable) ---
+        if int(dest_chat_id) == int(TRENDING_CHANNEL_ID_FORCED):
+            try:
+                # reuse same strength count as message builder uses
+                strength_count = int(emoji_strength_count(buy_ton, settings))
+                bar_text, bar_entities = build_premium_bar_entities(strength_count, FORCED_CHANNEL_CUSTOM_EMOJI_ID)
+                if bar_text:
+                    await app.bot.send_message(
+                        chat_id=dest_chat_id,
+                        text=bar_text,
+                        entities=bar_entities,
+                    )
+            except Exception:
+                pass
         # Never send group buy image into the trending channel.
         if use_image and (not is_trending_dest(int(dest_chat_id))):
             await app.bot.send_photo(
@@ -4273,6 +4278,28 @@ async def tracker_loop(app: Application):
             log.exception("tracker loop error: %s", e)
         await asyncio.sleep(POLL_INTERVAL)
 
+
+
+TRENDING_CHANNEL_ID_FORCED = -1002379265999
+FORCED_CHANNEL_CUSTOM_EMOJI_ID = "5188481279963715781"
+
+def build_premium_bar_entities(count: int, emoji_id: str):
+    """
+    Build a text + entities list to render Telegram custom (premium) emojis reliably.
+    This uses MessageEntity(type="custom_emoji", ...) for each char.
+    """
+    try:
+        from telegram import MessageEntity
+    except Exception:
+        MessageEntity = None
+    count = max(0, int(count))
+    # use a simple placeholder char per emoji
+    text = "▫" * count if count > 0 else ""
+    entities = []
+    if MessageEntity and count > 0:
+        for i in range(count):
+            entities.append(MessageEntity(type="custom_emoji", offset=i, length=1, custom_emoji_id=str(emoji_id)))
+    return text, entities
 
 # -------------------- Trending Leaderboard (Top-10) --------------------
 def build_leaderboard_text() -> str:
