@@ -2260,7 +2260,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ---- In-group Add Token wizard ----
     
     # ---- In-group Add Token wizard ----
-    if data == "CFG_GROUP":
+    if data in ("CFG","CFG_GROUP"):
         # Admin-only
         try:
             member = await context.bot.get_chat_member(q.message.chat_id, user.id)
@@ -2351,7 +2351,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    if data == "CFG_GROUP":
+    if data in ("CFG","CFG_GROUP"):
         # Crypton-style: group button opens DM config (deep-link) so you don't have to reply in group.
         if not await is_admin(context.bot, chat.id, user.id):
             await q.answer("Admins only.", show_alert=True)
