@@ -637,6 +637,12 @@ I18N: Dict[str, Dict[str, str]] = {
     "lang_set_ok": "Language saved: English ✅",
     "lang_set_ok_ru": "Language saved: Russian ✅",
     "need_admin": "Admins only.",
+    "grp_paste_ca": "⬇️ Paste the token contract address (CA) in this group.\nYou can also include the token Telegram link.\n\nExample:\n`<CA> https://t.me/yourtoken`",
+    "grp_token_details": "Token Details",
+    "grp_is_correct": "Is this correct?",
+    "grp_confirm": "✅ Confirm",
+    "grp_cancel": "❌ Cancel",
+    "grp_saved": "✅ Token saved. I will start posting buys here.",
     "wiz_paste_title": "🛰 SpyTON Setup — Paste Token CA",
     "wiz_paste_hint": "STON.fi / DeDust will be auto-detected.",
     "wiz_found_title": "🔎 Token found",
@@ -665,6 +671,12 @@ I18N: Dict[str, Dict[str, str]] = {
     "lang_set_ok": "Язык сохранён: English ✅",
     "lang_set_ok_ru": "Язык сохранён: Русский ✅",
     "need_admin": "Только для админов.",
+    "grp_paste_ca": "⬇️ Вставьте CA токена в эту группу.\nМожно добавить ссылку на Telegram токена.\n\nПример:\n`<CA> https://t.me/yourtoken`",
+    "grp_token_details": "Детали токена",
+    "grp_is_correct": "Это верно?",
+    "grp_confirm": "✅ Подтвердить",
+    "grp_cancel": "❌ Отмена",
+    "grp_saved": "✅ Токен сохранён. Я начну постить покупки здесь.",
     "wiz_paste_title": "🛰 Настройка SpyTON — отправьте CA",
     "wiz_paste_hint": "Пулы STON.fi / DeDust будут найдены автоматически.",
     "wiz_found_title": "🔎 Токен найден",
@@ -2244,6 +2256,48 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     data = q.data or ""
+
+    # ---- In-group Add Token wizard ----
+    if data == "CFG_GROUP":
+        member = await context.bot.get_chat_member(q.message.chat_id, user.id)
+        if member.status not in ("administrator", "creator"):
+            await q.answer(t("need_admin", _get_user_lang(user.id)), show_alert=True)
+            return
+        lang = _get_user_lang(user.id)
+        key = f"{q.message.chat_id}:{user.id}"
+        GROUP_AWAITING[key] = {"stage": "CA_WAIT"}
+        await q.answer()
+        await q.edit_message_text(t("grp_paste_ca", lang), parse_mode="Markdown")
+        return
+
+    if data == "CANCEL_GROUP":
+        key = f"{q.message.chat_id}:{user.id}"
+        GROUP_AWAITING.pop(key, None)
+        await q.answer()
+        await q.edit_message_text("Cancelled." if _get_user_lang(user.id)=="en" else "Отменено.")
+        return
+
+    if data == "CONFIRM_GROUP":
+        lang = _get_user_lang(user.id)
+        key = f"{q.message.chat_id}:{user.id}"
+        st = GROUP_AWAITING.get(key) or {}
+        pending = st.get("pending") if isinstance(st, dict) else None
+        pending = pending if isinstance(pending, dict) else {}
+        addr = pending.get("addr") or ""
+        tg_url = pending.get("tg") or ""
+        if not addr:
+            await q.answer()
+            return
+        await configure_group_token(q.message.chat_id, addr, context, reply_to_chat=q.message.chat_id, telegram=tg_url, dex_mode="both")
+        GROUP_AWAITING.pop(key, None)
+        await q.answer()
+        await context.bot.send_message(chat_id=q.message.chat_id, text=t("grp_saved", lang))
+        try:
+            await send_token_settings(update, context, q.message.chat_id)
+        except Exception:
+            pass
+        return
+
     if data == "LANG_PRIVATE":
         lang = _get_user_lang(user.id)
         kb = InlineKeyboardMarkup([
@@ -2952,6 +3006,58 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     text = (update.message.text or "").strip()
 
+
+    # ---- In-group CA wizard / quick paste ----
+    if chat.type != "private":
+        lang = _get_user_lang(user.id)
+        key = f"{chat.id}:{user.id}"
+        addr = normalize_ca(text) if "normalize_ca" in globals() else (detect_token_address(text) or "")
+        if addr:
+            member = await context.bot.get_chat_member(chat.id, user.id)
+            if member.status not in ("administrator", "creator"):
+                return
+            tg_url = ""
+            mlink = re.search(r"(https?://t\.me/[A-Za-z0-9_]{3,})", text)
+            if mlink:
+                tg_url = mlink.group(1)
+
+            name = ""
+            symbol = ""
+            holders = None
+            try:
+                info = tonapi_jetton_info(addr)
+                name = (info.get("name") or "").strip()
+                symbol = (info.get("symbol") or "").strip()
+                holders = info.get("holders")
+            except Exception:
+                pass
+            if not name or not symbol:
+                try:
+                    gk = gecko_token_info(addr)
+                    name = name or (gk.get("name") or "").strip()
+                    symbol = symbol or (gk.get("symbol") or "").strip()
+                    if holders is None and isinstance(gk.get("holders"), (int, float)):
+                        holders = int(gk.get("holders"))
+                except Exception:
+                    pass
+
+            details = (
+                f"*{t('grp_token_details', lang)}*\n"
+                f"Name: {name or '—'}\n"
+                f"Symbol: {symbol or '—'}\n"
+                f"Holders: {holders if holders is not None else '—'}\n\n"
+                f"{t('grp_is_correct', lang)}"
+            )
+
+            GROUP_AWAITING[key] = {"stage": "CONFIRM", "pending": {"addr": addr, "tg": tg_url}}
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton(t("grp_confirm", lang), callback_data="CONFIRM_GROUP")],
+                [InlineKeyboardButton(t("grp_cancel", lang), callback_data="CANCEL_GROUP")],
+            ])
+            await update.message.reply_text(details, reply_markup=kb, parse_mode="Markdown")
+            return
+
+
     # "ca" shortcut in groups: show currently configured token address (like listing bots)
     if chat.type in ("group", "supergroup") and text.lower() == "ca":
         g = get_group(chat.id)
@@ -3057,7 +3163,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Clear awaiting state after successful input
     if chat.type == "private":
         AWAITING.pop(user.id, None)
-
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Capture a buy image from an admin and store its Telegram file_id."""
