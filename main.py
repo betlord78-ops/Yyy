@@ -2676,7 +2676,7 @@ async def handle_token_settings_button(chat_id: int, data: str, update: Update, 
             "*Custom Buy Emoji*\n\n"
             "Send your emoji now.\n"
             "• Normal emoji: 🟢 or 🐥\n"
-            "• Premium emoji: send the <tg-emoji emoji-id=...> tag (HTML)\n\n"
+            "• Premium emoji: just send the premium emoji (no ID needed)\n\n"
             "After sending, all buy posts will use it.",
             parse_mode="Markdown",
             disable_web_page_preview=True,
@@ -2976,17 +2976,31 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await is_admin(context.bot, target_chat_id, user.id):
             AWAITING_CUSTOM_EMOJI.pop(user.id, None)
             return
+                # Accept:
+        #  - normal emoji (unicode)
+        #  - Telegram Premium custom emoji sent directly (we capture custom_emoji_id)
         raw = (update.message.text or "").strip()
-        # light validation: allow a single emoji or a <tg-emoji> HTML snippet
-        if len(raw) > 180:
-            await update.message.reply_text("Emoji text too long. Send a single emoji or a <tg-emoji ...> tag.")
-            return
-        if "<tg-emoji" not in raw and len(raw) > 6:
-            # Still allow multi-char unicode emoji sequences, but guard against long text
-            await update.message.reply_text("Send a single emoji (e.g. 🟢) or Telegram premium custom emoji in <tg-emoji ...> format.")
-            return
+        custom_id = None
+        try:
+            ents = update.message.entities or []
+            for e in ents:
+                if getattr(e, 'type', None) == 'custom_emoji' and getattr(e, 'custom_emoji_id', None):
+                    custom_id = str(e.custom_emoji_id)
+                    break
+        except Exception:
+            pass
+
+        # light validation for unicode fallback
+        if custom_id is None:
+            if len(raw) > 180:
+                await update.message.reply_text("Emoji text too long. Send a single emoji.")
+                return
+            if len(raw) > 6:
+                await update.message.reply_text("Send a single emoji (e.g. 🟢) or a premium emoji.")
+                return
         g = get_group(target_chat_id)
         g["settings"]["strength_emoji"] = raw
+        g["settings"]["strength_custom_emoji_id"] = custom_id
         save_groups()
         AWAITING_CUSTOM_EMOJI.pop(user.id, None)
         await update.message.reply_text("✅ Buy emoji updated.")
@@ -4222,7 +4236,19 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
         kb = build_buy_keyboard(int(dest_chat_id))
         local_msg = build_trending_channel_message() if is_trending_dest(int(dest_chat_id)) else build_group_message()
 
-        # --- Premium emoji bar for trending channel (entities-based, reliable) ---
+        
+        # --- Premium emoji bar for groups (entities-based) ---
+        if int(dest_chat_id) != int(TRENDING_CHANNEL_ID_FORCED):
+            try:
+                ceid = (get_group(int(dest_chat_id)).get("settings", {}) or {}).get("strength_custom_emoji_id")
+                if ceid:
+                    strength_count = int(emoji_strength_count(buy_ton, settings))
+                    bar_text, bar_entities = build_premium_bar_entities(strength_count, str(ceid))
+                    if bar_text:
+                        await app.bot.send_message(chat_id=dest_chat_id, text=bar_text, entities=bar_entities)
+            except Exception:
+                pass
+
         if int(dest_chat_id) == int(TRENDING_CHANNEL_ID_FORCED):
             try:
                 # reuse same strength count as message builder uses
