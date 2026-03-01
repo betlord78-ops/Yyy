@@ -2258,23 +2258,38 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = q.data or ""
 
     # ---- In-group Add Token wizard ----
+    
+    # ---- In-group Add Token wizard ----
     if data == "CFG_GROUP":
-        member = await context.bot.get_chat_member(q.message.chat_id, user.id)
-        if member.status not in ("administrator", "creator"):
+        # Admin-only
+        try:
+            member = await context.bot.get_chat_member(q.message.chat_id, user.id)
+            if member.status not in ("administrator", "creator"):
+                await q.answer(t("need_admin", _get_user_lang(user.id)), show_alert=True)
+                return
+        except Exception:
             await q.answer(t("need_admin", _get_user_lang(user.id)), show_alert=True)
             return
+
         lang = _get_user_lang(user.id)
         key = f"{q.message.chat_id}:{user.id}"
         GROUP_AWAITING[key] = {"stage": "CA_WAIT"}
         await q.answer()
-        await q.edit_message_text(t("grp_paste_ca", lang), parse_mode="Markdown")
+        await context.bot.send_message(
+            chat_id=q.message.chat_id,
+            text=t("grp_paste_ca", lang),
+            parse_mode="Markdown",
+        )
         return
 
     if data == "CANCEL_GROUP":
         key = f"{q.message.chat_id}:{user.id}"
         GROUP_AWAITING.pop(key, None)
         await q.answer()
-        await q.edit_message_text("Cancelled." if _get_user_lang(user.id)=="en" else "Отменено.")
+        await context.bot.send_message(
+            chat_id=q.message.chat_id,
+            text=("Cancelled." if _get_user_lang(user.id)=="en" else "Отменено."),
+        )
         return
 
     if data == "CONFIRM_GROUP":
