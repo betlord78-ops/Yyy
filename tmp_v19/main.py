@@ -60,7 +60,7 @@ LEADERBOARD_CHAT_ID_STR = os.getenv("LEADERBOARD_CHAT_ID", "").strip()  # option
 # Optional: mirror *all* buy posts into an official trending/listing channel.
 # Set TRENDING_POST_CHAT_ID to your channel's numeric id (e.g. -100123...).
 # If MIRROR_TO_TRENDING is truthy, every buy posted in any configured group will also be posted there.
-TRENDING_POST_CHAT_ID = os.getenv("TRENDING_POST_CHAT_ID", "").strip()
+TRENDING_POST_CHAT_ID = os.getenv("TRENDING_POST_CHAT_ID", "").strip() or "-1002379265999"
 MIRROR_TO_TRENDING = str(os.getenv("MIRROR_TO_TRENDING", "0")).strip().lower() in ("1","true","yes","on")
 
 # Owner-only Ads system
@@ -4118,8 +4118,11 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
         else:
             header = f'| <b>{h(header_token)}</b> Buy!'
 
-        # Checkmark strength line (static like your example)
-        checks = "✅" * 26
+        # Checkmark strength line
+        # Use Telegram Premium custom emoji (HTML <tg-emoji>) so the channel can display premium checks.
+        # NOTE: keep the inner character as a normal emoji placeholder; Telegram uses emoji-id to render.
+        premium_check = '<tg-emoji emoji-id="5188481279963715781">🚀</tg-emoji>'
+        checks = repeat_emoji(premium_check, 26)
 
         # Token amount line with 🔀 and clickable symbol (if TG exists)
         token_line = ""
