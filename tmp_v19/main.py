@@ -3299,7 +3299,7 @@ async def _set_token_now(chat_id: int, jetton: str, context: ContextTypes.DEFAUL
         f"• STON.fi pool: `{ston_pool or 'NONE'}`\n"
         f"• DeDust pool: `{dedust_pool or 'NONE'}`\n\n"
         f"Now posting buys automatically for this group.\n"
-        f"Use *Settings* to set buy strength & image."
+        f"Tap *Token Settings* to customize (min buy, emoji, media, links)."
     )
 
     await context.bot.send_message(
@@ -3307,6 +3307,7 @@ async def _set_token_now(chat_id: int, jetton: str, context: ContextTypes.DEFAUL
         text=msg,
         parse_mode="Markdown",
         disable_web_page_preview=True,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚙️ Token Settings", callback_data="TOKENSET_GROUP")]]),
     )
     if reply_chat_id != chat_id:
         await context.bot.send_message(
@@ -3314,6 +3315,7 @@ async def _set_token_now(chat_id: int, jetton: str, context: ContextTypes.DEFAUL
             text=msg,
             parse_mode="Markdown",
             disable_web_page_preview=True,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚙️ Token Settings", callback_data="TOKENSET_GROUP")]]),
         )
 
 # -------------------- TRACKERS --------------------
