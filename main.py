@@ -60,7 +60,7 @@ LEADERBOARD_CHAT_ID_STR = os.getenv("LEADERBOARD_CHAT_ID", "").strip()  # option
 # Optional: mirror *all* buy posts into an official trending/listing channel.
 # Set TRENDING_POST_CHAT_ID to your channel's numeric id (e.g. -100123...).
 # If MIRROR_TO_TRENDING is truthy, every buy posted in any configured group will also be posted there.
-TRENDING_POST_CHAT_ID = os.getenv("TRENDING_POST_CHAT_ID", "").strip() or "-1002379265999"
+TRENDING_POST_CHAT_ID = os.getenv("TRENDING_POST_CHAT_ID", "").strip()
 MIRROR_TO_TRENDING = str(os.getenv("MIRROR_TO_TRENDING", "0")).strip().lower() in ("1","true","yes","on")
 
 # Owner-only Ads system
@@ -2976,7 +2976,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await is_admin(context.bot, target_chat_id, user.id):
             AWAITING_CUSTOM_EMOJI.pop(user.id, None)
             return
+        # If user sent Telegram Premium custom emoji directly, capture its custom_emoji_id.
         raw = (update.message.text or "").strip()
+        try:
+            ents = update.message.entities or []
+            for e in ents:
+                if getattr(e, "type", None) == "custom_emoji" and getattr(e, "custom_emoji_id", None):
+                    ceid = str(e.custom_emoji_id)
+                    raw = f'<tg-emoji emoji-id="{ceid}"></tg-emoji>'
+                    break
+        except Exception:
+            pass
         # light validation: allow a single emoji or a <tg-emoji> HTML snippet
         if len(raw) > 180:
             await update.message.reply_text("Emoji text too long. Send a single emoji or a <tg-emoji ...> tag.")
@@ -4118,11 +4128,8 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
         else:
             header = f'| <b>{h(header_token)}</b> Buy!'
 
-        # Checkmark strength line
-        # Use Telegram Premium custom emoji (HTML <tg-emoji>) so the channel can display premium checks.
-        # NOTE: keep the inner character as a normal emoji placeholder; Telegram uses emoji-id to render.
-        premium_check = '<tg-emoji emoji-id="5188481279963715781">🚀</tg-emoji>'
-        checks = repeat_emoji(premium_check, 26)
+        # Checkmark strength line (static like your example)
+        checks = "✅" * 26
 
         # Token amount line with 🔀 and clickable symbol (if TG exists)
         token_line = ""
