@@ -631,7 +631,7 @@ I18N: Dict[str, Dict[str, str]] = {
     "lang_en": "🇬🇧 English",
     "lang_ru": "🇷🇺 Russian",
     "start_title": "🚀 *SpyTON BuyBot*",
-    "start_desc": "How to use:\n1️⃣ Click \"Add BuyBot to Group\"\n2️⃣ Choose your group from the list\n3️⃣ In the group, tap \"Configure Token\"\n4️⃣ Add Token and paste your token CA\n5️⃣ Edit settings — min buy, emoji, media, links\n\nUse the buttons below:",
+    "start_desc": "Premium buy alerts for STON.fi + DeDust (TON).\n\n• Add to a group\n• Configure token in 10 seconds\n• Clean buy posts + ads support\n\nUse the buttons below:",
     "connected_title": "✅ *SpyTON BuyBot connected*",
     "connected_desc": "Now send the token CA here in DM.\nI will auto-detect *STON.fi* / *DeDust* pools and start posting buys in your group.\n\nTip: you can also include the token Telegram link in the same message.\nExample:\n`<CA> https://t.me/YourToken`",
     "lang_set_ok": "Language saved: English ✅",
@@ -1882,10 +1882,10 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lang = _get_user_lang(update.effective_user.id if update.effective_user else None)
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton(t("btn_add_group", lang), url=add_url)],
-            [InlineKeyboardButton(t("btn_add_token", lang), callback_data="ADDTOKEN_PRIVATE"),
-             InlineKeyboardButton(t("btn_edit_tokens", lang), callback_data="EDITTOK_PRIVATE")],
-            [InlineKeyboardButton(t("btn_language", lang), callback_data="LANG_PRIVATE"),
-             InlineKeyboardButton(t("btn_support", lang), url="https://t.me/SpyTonEco")],
+            [InlineKeyboardButton(t("btn_cfg_token", lang), callback_data="CFG_PRIVATE")],
+            [InlineKeyboardButton(t("btn_settings", lang), callback_data="SET_PRIVATE")],
+            [InlineKeyboardButton(t("btn_language", lang), callback_data="LANG_PRIVATE")],
+            [InlineKeyboardButton(t("btn_support", lang), url="https://t.me/SpyTonEco")],
         ])
         await update.message.reply_text(
             t("start_title", lang) + "\n" + t("start_desc", lang),
@@ -1895,7 +1895,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         # In group, show group menu
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("⚙️ Configure Token", url=deep)],
+            [InlineKeyboardButton("⚙️ Configure Token", callback_data="CFG_GROUP")],
             [InlineKeyboardButton("⚙️ Token Settings", callback_data="TOKENSET_GROUP")],
             [InlineKeyboardButton("🛠 Settings", callback_data="SET_GROUP")],
             [InlineKeyboardButton("📊 Status", callback_data="STATUS_GROUP")],
@@ -2244,26 +2244,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     data = q.data or ""
-
-    # --- Private menu actions (SunTools-style) ---
-    if data == "ADDTOKEN_PRIVATE":
-        lang = _get_user_lang(user.id)
-        await q.answer()
-        await q.message.reply_text(
-            "To add a token:\n1) Add the bot to your group\n2) In the group, tap *Configure Token*\n3) Continue in DM and paste your token CA.",
-            parse_mode="Markdown"
-        )
-        return
-
-    if data == "EDITTOK_PRIVATE":
-        lang = _get_user_lang(user.id)
-        await q.answer()
-        await q.message.reply_text(
-            "To edit token settings:\n• Open your group where SpyTON BuyBot is added\n• Tap *Token Settings*\n\n(Each group manages its own token.)",
-            parse_mode="Markdown"
-        )
-        return
-
     if data == "LANG_PRIVATE":
         lang = _get_user_lang(user.id)
         kb = InlineKeyboardMarkup([
@@ -2696,7 +2676,7 @@ async def handle_token_settings_button(chat_id: int, data: str, update: Update, 
             "*Custom Buy Emoji*\n\n"
             "Send your emoji now.\n"
             "• Normal emoji: 🟢 or 🐥\n"
-            "• Premium emoji: just send the premium emoji (no ID needed)\n\n"
+            "• Premium emoji: send the <tg-emoji emoji-id=...> tag (HTML)\n\n"
             "After sending, all buy posts will use it.",
             parse_mode="Markdown",
             disable_web_page_preview=True,
@@ -2996,31 +2976,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await is_admin(context.bot, target_chat_id, user.id):
             AWAITING_CUSTOM_EMOJI.pop(user.id, None)
             return
-                # Accept:
-        #  - normal emoji (unicode)
-        #  - Telegram Premium custom emoji sent directly (we capture custom_emoji_id)
         raw = (update.message.text or "").strip()
-        custom_id = None
-        try:
-            ents = update.message.entities or []
-            for e in ents:
-                if getattr(e, 'type', None) == 'custom_emoji' and getattr(e, 'custom_emoji_id', None):
-                    custom_id = str(e.custom_emoji_id)
-                    break
-        except Exception:
-            pass
-
-        # light validation for unicode fallback
-        if custom_id is None:
-            if len(raw) > 180:
-                await update.message.reply_text("Emoji text too long. Send a single emoji.")
-                return
-            if len(raw) > 6:
-                await update.message.reply_text("Send a single emoji (e.g. 🟢) or a premium emoji.")
-                return
+        # light validation: allow a single emoji or a <tg-emoji> HTML snippet
+        if len(raw) > 180:
+            await update.message.reply_text("Emoji text too long. Send a single emoji or a <tg-emoji ...> tag.")
+            return
+        if "<tg-emoji" not in raw and len(raw) > 6:
+            # Still allow multi-char unicode emoji sequences, but guard against long text
+            await update.message.reply_text("Send a single emoji (e.g. 🟢) or Telegram premium custom emoji in <tg-emoji ...> format.")
+            return
         g = get_group(target_chat_id)
         g["settings"]["strength_emoji"] = raw
-        g["settings"]["strength_custom_emoji_id"] = custom_id
         save_groups()
         AWAITING_CUSTOM_EMOJI.pop(user.id, None)
         await update.message.reply_text("✅ Buy emoji updated.")
@@ -4256,19 +4222,7 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
         kb = build_buy_keyboard(int(dest_chat_id))
         local_msg = build_trending_channel_message() if is_trending_dest(int(dest_chat_id)) else build_group_message()
 
-        
-        # --- Premium emoji bar for groups (entities-based) ---
-        if int(dest_chat_id) != int(TRENDING_CHANNEL_ID_FORCED):
-            try:
-                ceid = (get_group(int(dest_chat_id)).get("settings", {}) or {}).get("strength_custom_emoji_id")
-                if ceid:
-                    strength_count = int(emoji_strength_count(buy_ton, settings))
-                    bar_text, bar_entities = build_premium_bar_entities(strength_count, str(ceid))
-                    if bar_text:
-                        await app.bot.send_message(chat_id=dest_chat_id, text=bar_text, entities=bar_entities)
-            except Exception:
-                pass
-
+        # --- Premium emoji bar for trending channel (entities-based, reliable) ---
         if int(dest_chat_id) == int(TRENDING_CHANNEL_ID_FORCED):
             try:
                 # reuse same strength count as message builder uses
