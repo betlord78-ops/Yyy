@@ -631,7 +631,7 @@ I18N: Dict[str, Dict[str, str]] = {
     "lang_en": "🇬🇧 English",
     "lang_ru": "🇷🇺 Russian",
     "start_title": "🚀 *SpyTON BuyBot*",
-    "start_desc": "Premium buy alerts for STON.fi + DeDust (TON).\n\n• Add to a group\n• Configure token in 10 seconds\n• Clean buy posts + ads support\n\nUse the buttons below:",
+    "start_desc": "How to use:\n1️⃣ Click \"Add BuyBot to Group\"\n2️⃣ Choose your group from the list\n3️⃣ In the group, tap \"Configure Token\"\n4️⃣ Add Token and paste your token CA\n5️⃣ Edit settings — min buy, emoji, media, links\n\nUse the buttons below:",
     "connected_title": "✅ *SpyTON BuyBot connected*",
     "connected_desc": "Now send the token CA here in DM.\nI will auto-detect *STON.fi* / *DeDust* pools and start posting buys in your group.\n\nTip: you can also include the token Telegram link in the same message.\nExample:\n`<CA> https://t.me/YourToken`",
     "lang_set_ok": "Language saved: English ✅",
@@ -1882,10 +1882,10 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lang = _get_user_lang(update.effective_user.id if update.effective_user else None)
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton(t("btn_add_group", lang), url=add_url)],
-            [InlineKeyboardButton(t("btn_cfg_token", lang), callback_data="CFG_PRIVATE")],
-            [InlineKeyboardButton(t("btn_settings", lang), callback_data="SET_PRIVATE")],
-            [InlineKeyboardButton(t("btn_language", lang), callback_data="LANG_PRIVATE")],
-            [InlineKeyboardButton(t("btn_support", lang), url="https://t.me/SpyTonEco")],
+            [InlineKeyboardButton(t("btn_add_token", lang), callback_data="ADDTOKEN_PRIVATE"),
+             InlineKeyboardButton(t("btn_edit_tokens", lang), callback_data="EDITTOK_PRIVATE")],
+            [InlineKeyboardButton(t("btn_language", lang), callback_data="LANG_PRIVATE"),
+             InlineKeyboardButton(t("btn_support", lang), url="https://t.me/SpyTonEco")],
         ])
         await update.message.reply_text(
             t("start_title", lang) + "\n" + t("start_desc", lang),
@@ -1895,7 +1895,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         # In group, show group menu
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("⚙️ Configure Token", callback_data="CFG_GROUP")],
+            [InlineKeyboardButton("⚙️ Configure Token", url=deep)],
             [InlineKeyboardButton("⚙️ Token Settings", callback_data="TOKENSET_GROUP")],
             [InlineKeyboardButton("🛠 Settings", callback_data="SET_GROUP")],
             [InlineKeyboardButton("📊 Status", callback_data="STATUS_GROUP")],
@@ -2244,6 +2244,26 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     data = q.data or ""
+
+    # --- Private menu actions (SunTools-style) ---
+    if data == "ADDTOKEN_PRIVATE":
+        lang = _get_user_lang(user.id)
+        await q.answer()
+        await q.message.reply_text(
+            "To add a token:\n1) Add the bot to your group\n2) In the group, tap *Configure Token*\n3) Continue in DM and paste your token CA.",
+            parse_mode="Markdown"
+        )
+        return
+
+    if data == "EDITTOK_PRIVATE":
+        lang = _get_user_lang(user.id)
+        await q.answer()
+        await q.message.reply_text(
+            "To edit token settings:\n• Open your group where SpyTON BuyBot is added\n• Tap *Token Settings*\n\n(Each group manages its own token.)",
+            parse_mode="Markdown"
+        )
+        return
+
     if data == "LANG_PRIVATE":
         lang = _get_user_lang(user.id)
         kb = InlineKeyboardMarkup([
@@ -3389,7 +3409,7 @@ async def poll_once(app: Application):
             burst["count"] = 0
 
         # STON (STON exported events by blocks)
-        if settings.get("enable_ston", True) and token.get("ston_pool"):
+        if settings.get("enable_ston", True) and token.get("ston_pool") and not token.get("dedust_pool"):
             pool = token["ston_pool"]
             try:
                 latest = await _to_thread(ston_latest_block)
