@@ -3059,7 +3059,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         AWAITING.pop(user.id, None)
 
 
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Capture a buy image from an admin and store its Telegram file_id."""
     if not update.message or not update.effective_user or not update.effective_chat:
         return
@@ -3081,13 +3081,26 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         AWAITING_IMAGE.pop(user.id, None)
         return
 
-    photos = update.message.photo or []
-    if not photos:
+    
+    file_id=None
+    media_type=None
+
+    if update.message.photo:
+        file_id = update.message.photo[-1].file_id
+        media_type = "photo"
+    elif update.message.animation:
+        file_id = update.message.animation.file_id
+        media_type = "gif"
+    elif update.message.video:
+        file_id = update.message.video.file_id
+        media_type = "video"
+
+    if not file_id:
         return
 
-    file_id = photos[-1].file_id  # largest
     g = get_group(target_chat_id)
     g["settings"]["buy_image_file_id"] = file_id
+    g["settings"]["buy_image_type"] = media_type
     g["settings"]["buy_image_on"] = True
     save_groups()
     AWAITING_IMAGE.pop(user.id, None)
@@ -4641,7 +4654,7 @@ def main():
     application.add_handler(CommandHandler("adstatus", adstatus_cmd))
     application.add_handler(CallbackQueryHandler(on_replace_button, pattern=r"^(REPL_|CANCEL_REPL$)"))
     application.add_handler(CallbackQueryHandler(on_button))
-    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    application.add_handler(MessageHandler(filters.PHOTO | filters.ANIMATION | filters.VIDEO, handle_media))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     application.add_handler(ChatMemberHandler(on_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
 
