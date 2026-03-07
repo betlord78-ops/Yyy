@@ -3375,7 +3375,7 @@ async def poll_once(app: Application):
             burst["count"] = 0
 
         # STON (STON exported events by blocks)
-        if settings.get("enable_ston", True) and token.get("ston_pool"):
+        if settings.get("enable_ston", True) and token.get("ston_pool") and not token.get("dedust_pool"):
             pool = token["ston_pool"]
             try:
                 latest = await _to_thread(ston_latest_block)
