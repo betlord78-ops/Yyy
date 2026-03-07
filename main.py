@@ -3253,8 +3253,8 @@ async def _set_token_now(chat_id: int, jetton: str, context: ContextTypes.DEFAUL
             s["enable_ston"] = False
             s["enable_dedust"] = True
         else:
-            s["enable_ston"] = False if dedust_pool else bool(ston_pool)
             s["enable_dedust"] = bool(dedust_pool)
+            s["enable_ston"] = False if dedust_pool else bool(ston_pool)
         g["settings"] = s
     except Exception:
         pass
@@ -3701,7 +3701,7 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
 
     ston_pool = token.get("ston_pool") or ""
     dedust_pool = token.get("dedust_pool") or ""
-    pool_for_market = ston_pool or dedust_pool
+    pool_for_market = dedust_pool or ston_pool
 
     # Jetton address (used for holders + market cache keys)
     jetton_addr = str(token.get("address") or "").strip()
