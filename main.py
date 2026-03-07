@@ -1,4 +1,20 @@
 
+# ---- DEX SELECTION PATCH ----
+def choose_dex_by_liquidity(pools):
+    if not pools:
+        return None
+    best=None
+    best_liq=0
+    for p in pools:
+        liq=p.get("liquidity_usd") or p.get("liquidity") or 0
+        dex=(p.get("dex") or "").lower()
+        if dex=="dedust" and liq>=best_liq:
+            best=p; best_liq=liq+0.0001
+        elif liq>best_liq:
+            best=p; best_liq=liq
+    return best
+
+
 import os, json, time, asyncio, logging, re, html, base64
 from typing import Any, Dict, Optional, List, Tuple
 from urllib.parse import urlparse, quote
