@@ -24,7 +24,7 @@ log = logging.getLogger("spyton_public")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 TONAPI_KEY = os.getenv("TONAPI_KEY", "").strip()
 TONAPI_BASE = os.getenv("TONAPI_BASE", "https://tonapi.io").strip().rstrip("/")
-POLL_INTERVAL = max(2.0, float(os.getenv("POLL_INTERVAL", "2.0")))
+POLL_INTERVAL = max(0.75, float(os.getenv("POLL_INTERVAL", "0.75")))
 BURST_WINDOW_SEC = int(os.getenv("BURST_WINDOW_SEC", "30"))
 DTRADE_REF = os.getenv("DTRADE_REF", "https://t.me/dtrade?start=11TYq7LInG").strip()
 TRENDING_URL = os.getenv("TRENDING_URL", "https://t.me/SpyTonTrending").strip()
@@ -218,25 +218,20 @@ def ston_event_ton_leg(ev: Dict[str, Any]) -> Optional[int]:
         return 1
     return None
 
-def ston_event_is_buy(ev: Dict[str, Any], ton_leg: int):
+def ston_event_is_buy(ev: Dict[str, Any], ton_leg: int, token_decimals: int = 9):
     """Return (is_buy, ton_spent, token_received). Sells are ignored (is_buy=False)."""
-    a0_in = _to_float(ev.get("amount0In"))
-    a0_out = _to_float(ev.get("amount0Out"))
-    a1_in = _to_float(ev.get("amount1In"))
-    a1_out = _to_float(ev.get("amount1Out"))
-
     if ton_leg == 0:
-        # BUY: TON in (leg0), token out (leg1)
+        a0_in = _safe_ton_amount(ev.get("amount0In"))
+        a1_out = _safe_token_amount(ev.get("amount1Out"), token_decimals)
         if a0_in > 0 and a1_out > 0:
             return True, a0_in, a1_out
-        # SELL would be a1_in > 0 and a0_out > 0 (ignore)
         return False, 0.0, 0.0
 
     if ton_leg == 1:
-        # BUY: TON in (leg1), token out (leg0)
+        a1_in = _safe_ton_amount(ev.get("amount1In"))
+        a0_out = _safe_token_amount(ev.get("amount0Out"), token_decimals)
         if a1_in > 0 and a0_out > 0:
             return True, a1_in, a0_out
-        # SELL would be a0_in > 0 and a1_out > 0 (ignore)
         return False, 0.0, 0.0
 
     return False, 0.0, 0.0
@@ -397,19 +392,14 @@ def dedust_trade_to_buy(tr: Dict[str, Any], token_addr: str) -> Optional[Dict[st
         return None
 
     # TON amount is in TON (API usually already human). If API returns nano, it will be huge; we guard:
-    ton_amt = amt_in_f
-    if ton_amt > 1e8:  # looks like nanoTON
-        ton_amt = ton_amt / 1e9
+    ton_amt = _safe_ton_amount(amt_in)
 
     token_amt = amt_out_f
-    # DeDust API sometimes returns jetton amount in minimal units (integer-like).
-    # Convert using jetton decimals when it looks too large.
     try:
         dec = int(get_jetton_meta(token_addr).get("decimals") or 9)
-        if token_amt > 1e8:
-            token_amt = token_amt / (10 ** dec)
+        token_amt = _safe_token_amount(amt_out, dec)
     except Exception:
-        pass
+        token_amt = _safe_token_amount(amt_out_f, 9)
 
     return {
         "tx": tx or trade_id,
@@ -587,10 +577,11 @@ DEFAULT_SETTINGS = {
     "strength_step_ton": 5.0,   # 1 strength unit per X TON
     "strength_max": 30,         # max emojis
 
-    # Optional buy alert image
-    # If enabled and a file_id is set, the bot will send a Telegram photo (not a link).
+    # Optional buy alert media
+    # Supports Telegram photo, GIF/animation, or short video using the stored file_id.
     "buy_image_on": False,
     "buy_image_file_id": "",
+    "buy_media_type": "photo",
 
     # Min buy can be TON or USD
     "min_buy_unit": "TON",   # TON | USD
@@ -601,6 +592,11 @@ DEFAULT_SETTINGS = {
     "show_liquidity": True,
     "show_mcap": True,
     "show_holders": True,
+
+    # Token branding / customization
+    "custom_title": "",
+    "custom_symbol": "",
+    "custom_buy_label": "",
 }
 
 def _load_json(path: str, default):
@@ -733,7 +729,7 @@ AWAITING: Dict[int, Dict[str, Any]] = {}  # user_id -> {'group_id': int, 'stage'
 # user_id -> chat_id awaiting social link input
 AWAITING_SOCIAL: Dict[int, Dict[str, Any]] = {}  # {'chat_id': int, 'field': 'telegram'|'website'|'twitter'}
 
-# user_id -> chat_id awaiting buy image photo
+# user_id -> chat_id awaiting buy media (photo / gif / short video)
 AWAITING_IMAGE: Dict[int, int] = {}
 
 # user_id -> awaiting custom strength emoji text (can be normal emoji or <tg-emoji ...>)
@@ -1645,6 +1641,56 @@ def _to_float(x) -> float:
     except Exception:
         return 0.0
 
+def _scaled_amount(raw: Any, decimals: int = 0, integer_raw_threshold: Optional[int] = None) -> float:
+    """Parse amounts that may be human-readable or raw on-chain integers.
+
+    Heuristics:
+    - values containing a decimal point are treated as already scaled
+    - integer-like TON values >= 1e6 are likely nanoTON and get divided by 1e9
+    - integer-like jetton values above a decimals-aware threshold get divided by 10**decimals
+    """
+    try:
+        if isinstance(raw, dict):
+            raw = raw.get("value") or raw.get("amount") or raw.get("raw")
+        if raw is None:
+            return 0.0
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+            s = str(raw)
+        else:
+            s = str(raw).strip()
+        if not s or s.lower() in ("none", "null"):
+            return 0.0
+        if "." in s:
+            return float(s)
+        neg = s.startswith("-")
+        body = s[1:] if neg else s
+        if not body.isdigit():
+            return _to_float(s)
+        val = int(body)
+        if neg:
+            val = -val
+        dec = max(0, int(decimals or 0))
+        if dec > 0:
+            threshold = integer_raw_threshold
+            if threshold is None:
+                threshold = 10 ** max(6, min(dec, 8))
+            if abs(val) >= int(threshold):
+                return float(val) / (10 ** dec)
+        return float(val)
+    except Exception:
+        return _to_float(raw)
+
+def _safe_ton_amount(raw: Any) -> float:
+    return _scaled_amount(raw, decimals=9, integer_raw_threshold=10**6)
+
+def _safe_token_amount(raw: Any, decimals: int = 9) -> float:
+    dec = 9
+    try:
+        dec = int(decimals or 9)
+    except Exception:
+        dec = 9
+    return _scaled_amount(raw, decimals=dec, integer_raw_threshold=10 ** max(6, min(dec, 8)))
+
 def stonfi_extract_buys_from_tonapi_tx(tx: Dict[str, Any], token_addr: str) -> List[Dict[str, Any]]:
     """Heuristic buy parser from TonAPI tx actions.
     BUY = TON -> token_addr.
@@ -1699,44 +1745,17 @@ def stonfi_extract_buys_from_tonapi_tx(tx: Dict[str, Any], token_addr: str) -> L
             return False
 
         def _parse_amount(raw: Any, asset: Any) -> Optional[float]:
-            """Handle both already-decimal numbers and raw on-chain integers."""
             if raw is None:
                 return None
-            # numeric
-            if isinstance(raw, (int, float)):
-                val = float(raw)
-            else:
-                s = str(raw).strip()
-                if not s:
-                    return None
-                # if it looks like an integer string, keep as int-like
-                if s.replace("-", "").isdigit():
-                    try:
-                        val = float(int(s))
-                    except Exception:
-                        val = _to_float(s)
-                else:
-                    val = _to_float(s)
-
-            # scale if it looks like a raw integer
-            dec = None
+            dec = 0
             if isinstance(asset, dict):
-                d = asset.get("decimals")
-                if isinstance(d, int):
-                    dec = d
-                else:
-                    try:
-                        dec = int(d)
-                    except Exception:
-                        dec = None
-
-            if dec is not None:
-                # If we got a big integer-ish value and no decimal point in original, assume raw.
-                raw_s = str(raw).strip() if raw is not None else ""
-                if raw_s and raw_s.replace("-", "").isdigit() and abs(val) >= 10 ** (dec + 2):
-                    val = val / (10 ** dec)
-
-            return val
+                try:
+                    dec = int(asset.get("decimals") or 0)
+                except Exception:
+                    dec = 0
+            if _is_ton_asset(asset):
+                return _safe_ton_amount(raw)
+            return _safe_token_amount(raw, dec or 9)
 
         in_addr = _asset_addr(in_asset)
         out_addr = _asset_addr(out_asset)
@@ -1803,23 +1822,15 @@ def dedust_extract_buys_from_tonapi_event(ev: Dict[str, Any], token_addr: str) -
             return t == "ton" or sym == "ton"
 
         def _parse_amount(raw: Any, asset: Any) -> float:
-            s = str(raw).strip()
-            if s == "" or s.lower() in ("none", "null"):
-                return 0.0
-            if "." in s:
-                return _to_float(s)
-            if s.isdigit():
-                dec = 0
-                if isinstance(asset, dict):
-                    try:
-                        dec = int(asset.get("decimals") or 0)
-                    except Exception:
-                        dec = 0
+            if _is_ton_asset(asset):
+                return _safe_ton_amount(raw)
+            dec = 0
+            if isinstance(asset, dict):
                 try:
-                    return int(s) / (10 ** max(dec, 0))
+                    dec = int(asset.get("decimals") or 0)
                 except Exception:
-                    return _to_float(s)
-            return _to_float(s)
+                    dec = 0
+            return _safe_token_amount(raw, dec or 9)
 
         in_is_ton = _is_ton_asset(in_asset)
         out_addr = ""
@@ -2113,6 +2124,8 @@ async def addtoken_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "ignore_before_ts": int(time.time()),
         "burst": {"window_start": int(time.time()), "count": 0},
         "telegram": tg_url.strip() if tg_url else "",
+        "website": "",
+        "twitter": "",
     }
     GLOBAL_TOKENS[str(jetton)] = tok
     save_groups()  # also saves GLOBAL_TOKENS
@@ -2374,9 +2387,13 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await is_admin(context.bot, chat.id, user.id):
             await q.answer("Admins only.", show_alert=True)
             return
-        # Next photo from this admin will be saved as the buy image for this group.
+        # Next media from this admin will be saved as the buy media for this group.
         AWAITING_IMAGE[user.id] = chat.id
-        await q.message.reply_text("Send the *buy image* now as a Telegram photo (not a file).", parse_mode="Markdown")
+        await q.message.reply_text(
+            "Send the *buy media* now as a Telegram photo, GIF, or short video.\n"
+            "Please send it as normal Telegram media, not as a file.",
+            parse_mode="Markdown",
+        )
         return
 
     if data == "IMG_CLEAR":
@@ -2578,8 +2595,9 @@ async def send_token_settings(chat_id: int, context: ContextTypes.DEFAULT_TYPE, 
          InlineKeyboardButton("Emoji", callback_data="TS_EMO")],
         [InlineKeyboardButton("Manage Media", callback_data="TS_MEDIA"),
          InlineKeyboardButton("Social Links", callback_data="TS_SOC")],
-        [InlineKeyboardButton("Layout", callback_data="TS_LAYOUT"),
-         InlineKeyboardButton("Bot Preview", callback_data="TS_PREVIEW")],
+        [InlineKeyboardButton("Branding", callback_data="TS_BRAND"),
+         InlineKeyboardButton("Layout", callback_data="TS_LAYOUT")],
+        [InlineKeyboardButton("Bot Preview", callback_data="TS_PREVIEW")],
         [InlineKeyboardButton("Pause / Resume", callback_data="TS_PAUSE"),
          InlineKeyboardButton("Remove Token", callback_data="TS_REMOVE")],
         [InlineKeyboardButton("⬅️ Back", callback_data="TS_BACK")],
@@ -2728,6 +2746,49 @@ async def handle_token_settings_button(chat_id: int, data: str, update: Update, 
 
     if data == "TS_MEDIA_TOG":
         s["buy_image_on"] = not bool(s.get("buy_image_on", False))
+        save_groups()
+        await send_token_settings(chat_id, context, msg, edit=True)
+        return
+
+    # ----- Branding -----
+    if data == "TS_BRAND":
+        current_title = str(s.get("custom_title") or (tok.get("name") if isinstance(tok, dict) else "") or "").strip()
+        current_symbol = str(s.get("custom_symbol") or (tok.get("symbol") if isinstance(tok, dict) else "") or "").strip()
+        custom_buy = str(s.get("custom_buy_label") or "").strip()
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Set Token Name", callback_data="TS_BRAND_SET_TITLE"),
+             InlineKeyboardButton("Set Symbol", callback_data="TS_BRAND_SET_SYMBOL")],
+            [InlineKeyboardButton("Set Buy Button", callback_data="TS_BRAND_SET_BUY")],
+            [InlineKeyboardButton("Reset Branding", callback_data="TS_BRAND_RESET")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="TS_BACK")],
+        ])
+        await msg.edit_text(
+            "*Branding*\n"
+            f"Name: *{(current_title or '—').replace('*', '')}*\n"
+            f"Symbol: *{(current_symbol or '—').replace('*', '')}*\n"
+            f"Buy button: *{(custom_buy or 'default').replace('*', '')}*\n\n"
+            "You can customize how your token appears in buy posts.",
+            parse_mode="Markdown",
+            reply_markup=kb,
+            disable_web_page_preview=True,
+        )
+        return
+
+    if data in ("TS_BRAND_SET_TITLE", "TS_BRAND_SET_SYMBOL", "TS_BRAND_SET_BUY"):
+        field = "custom_title" if data.endswith("TITLE") else ("custom_symbol" if data.endswith("SYMBOL") else "custom_buy_label")
+        AWAITING_TEXT_SETTING[update.effective_user.id] = {"chat_id": chat_id, "field": field}
+        prompt = {
+            "custom_title": "Send the custom token *name* now in DM.",
+            "custom_symbol": "Send the custom token *symbol* now in DM.",
+            "custom_buy_label": "Send the custom *buy button label* now in DM.",
+        }[field]
+        await msg.reply_text(prompt, parse_mode="Markdown")
+        return
+
+    if data == "TS_BRAND_RESET":
+        s["custom_title"] = ""
+        s["custom_symbol"] = ""
+        s["custom_buy_label"] = ""
         save_groups()
         await send_token_settings(chat_id, context, msg, edit=True)
         return
@@ -2993,6 +3054,28 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 
+    # Branding / custom text input
+    if user.id in AWAITING_TEXT_SETTING:
+        cfg = AWAITING_TEXT_SETTING.get(user.id) or {}
+        target_chat_id = int(cfg.get("chat_id") or 0)
+        field = str(cfg.get("field") or "").strip()
+        val = (update.message.text or "").strip()
+        if target_chat_id and field:
+            g = get_group(target_chat_id)
+            s = g.get("settings") or {}
+            if field == "custom_symbol":
+                val = val[:24]
+            elif field == "custom_buy_label":
+                val = val[:32]
+            else:
+                val = val[:48]
+            s[field] = val
+            g["settings"] = s
+            save_groups()
+            await update.message.reply_text("✅ Saved.")
+        AWAITING_TEXT_SETTING.pop(user.id, None)
+        return
+
     # Social link input (Token Settings -> Social Links)
     if user.id in AWAITING_SOCIAL:
         cfg = AWAITING_SOCIAL.get(user.id) or {}
@@ -3060,7 +3143,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Capture a buy image from an admin and store its Telegram file_id."""
+    """Capture buy media from an admin and store its Telegram file_id and type."""
     if not update.message or not update.effective_user or not update.effective_chat:
         return
     user = update.effective_user
@@ -3081,18 +3164,30 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         AWAITING_IMAGE.pop(user.id, None)
         return
 
+    media_type = None
+    file_id = ""
+
     photos = update.message.photo or []
-    if not photos:
+    if photos:
+        media_type = "photo"
+        file_id = photos[-1].file_id  # largest photo
+    elif getattr(update.message, "animation", None):
+        media_type = "animation"
+        file_id = update.message.animation.file_id
+    elif getattr(update.message, "video", None):
+        media_type = "video"
+        file_id = update.message.video.file_id
+    else:
         return
 
-    file_id = photos[-1].file_id  # largest
     g = get_group(target_chat_id)
     g["settings"]["buy_image_file_id"] = file_id
+    g["settings"]["buy_media_type"] = media_type
     g["settings"]["buy_image_on"] = True
     save_groups()
     AWAITING_IMAGE.pop(user.id, None)
 
-    await update.message.reply_text("✅ Buy image saved. Image mode is now ON.")
+    await update.message.reply_text(f"✅ Buy media saved ({media_type}). Image mode is now ON.")
 
 async def configure_group_token(chat_id: int, jetton: str, context: ContextTypes.DEFAULT_TYPE, reply_to_chat: int, telegram: str = "", dex_mode: str = "both"):
     g = get_group(chat_id)
@@ -3253,8 +3348,8 @@ async def _set_token_now(chat_id: int, jetton: str, context: ContextTypes.DEFAUL
             s["enable_ston"] = False
             s["enable_dedust"] = True
         else:
-            s["enable_ston"] = bool(ston_pool)
             s["enable_dedust"] = bool(dedust_pool)
+            s["enable_ston"] = False if dedust_pool else bool(ston_pool)
         g["settings"] = s
     except Exception:
         pass
@@ -3277,6 +3372,8 @@ async def _set_token_now(chat_id: int, jetton: str, context: ContextTypes.DEFAUL
         "ignore_before_ts": int(time.time()),
         "burst": {"window_start": int(time.time()), "count": 0},
         "telegram": telegram.strip() if telegram else "",
+        "website": "",
+        "twitter": "",
     }
     save_groups()
 
@@ -3421,7 +3518,7 @@ async def poll_once(app: Application):
                     ton_leg = ston_event_ton_leg(ev)
                     if ton_leg is None:
                         ton_leg = ensure_ton_leg_for_pool(token)
-                    is_buy, ton_spent, token_received = ston_event_is_buy(ev, ton_leg if ton_leg in (0,1) else -1)
+                    is_buy, ton_spent, token_received = ston_event_is_buy(ev, ton_leg if ton_leg in (0,1) else -1, int(token.get("decimals") or 9))
                     if not is_buy:
                         continue
                     if ton_spent < min_buy:
@@ -3450,20 +3547,8 @@ async def poll_once(app: Application):
                                 continue
                             buys = stonfi_extract_buys_from_tonapi_tx(txo, token["address"])
                             for b in buys:
-                                ton_spent = float(b.get("ton") or 0.0)
-                                # TonAPI sometimes returns nanoTON
-                                if ton_spent > 1e5:
-                                    ton_spent = ton_spent / 1e9
-
-                                token_amt = float(b.get("token_amount") or 0.0)
-                                dec = token.get("decimals")
-                                try:
-                                    dec_i = int(dec) if dec is not None else None
-                                except Exception:
-                                    dec_i = None
-                                # TonAPI often returns jetton amount in minimal units
-                                if dec_i is not None and token_amt > 1e8:
-                                    token_amt = token_amt / (10 ** dec_i)
+                                ton_spent = _safe_ton_amount(b.get("ton") or 0.0)
+                                token_amt = _safe_token_amount(b.get("token_amount") or 0.0, int(token.get("decimals") or 9))
 
                                 if ton_spent < min_buy:
                                     continue
@@ -3701,7 +3786,7 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
 
     ston_pool = token.get("ston_pool") or ""
     dedust_pool = token.get("dedust_pool") or ""
-    pool_for_market = ston_pool or dedust_pool
+    pool_for_market = dedust_pool or ston_pool
 
     # Jetton address (used for holders + market cache keys)
     jetton_addr = str(token.get("address") or "").strip()
@@ -3886,9 +3971,10 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
                     change_pct = float(_ch)
     except Exception:
         change_pct = None
-    # Token telegram button should reflect the token's own link.
-    # If not set, hide the button (avoid wrong/static links).
+    # Token links should reflect the token's own settings.
     tg_link = (token.get("telegram") or "").strip()
+    website_link = (token.get("website") or "").strip()
+    twitter_link = (token.get("twitter") or "").strip()
     trending = TRENDING_URL
 
     # Pull settings for this chat (for strength + image)
@@ -3931,6 +4017,10 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
     # Build a chart link for the header.
     jetton_url = f"https://tonviewer.com/jetton/{quote(jetton_addr)}" if jetton_addr else ""
     chart_url = gt_url or dex_url or jetton_url or ""
+    display_title = str(s.get("custom_title") or token.get("name") or token.get("symbol") or title or "TOKEN").strip()
+    display_symbol = str(s.get("custom_symbol") or token.get("symbol") or token.get("name") or tok_symbol or title or "TOKEN").strip()
+    title = display_title
+    tok_symbol = display_symbol
     header_link = chart_url or trending or ""
 
     # USD display (best-effort)
@@ -4202,8 +4292,9 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
     # Default message used for the original chat send
     msg = build_trending_channel_message() if is_trending_dest(int(chat_id)) else build_group_message()
 
-    # If buy image enabled and a Telegram file_id is set, send a photo with caption.
+    # If buy media is enabled and a Telegram file_id is set, send the configured media with caption.
     buy_file_id = (s.get("buy_image_file_id") or "").strip()
+    buy_media_type = str(s.get("buy_media_type") or "photo").strip().lower()
     use_image = bool(s.get("buy_image_on", False)) and bool(buy_file_id)
 
     # Buttons:
@@ -4215,7 +4306,8 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
             return InlineKeyboardMarkup([[book_btn]])
 
         # Groups: one clean Buy button (text links are in message body)
-        buy_btn = InlineKeyboardButton(f"Buy {tok_symbol or title} with dTrade", url=buy_url)
+        buy_btn_text = str(s.get("custom_buy_label") or "").strip() or f"Buy {tok_symbol or title} with dTrade"
+        buy_btn = InlineKeyboardButton(buy_btn_text[:64], url=buy_url)
         return InlineKeyboardMarkup([[buy_btn]])
 
     async def _send(dest_chat_id: int):
@@ -4236,15 +4328,33 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
                     )
             except Exception:
                 pass
-        # Never send group buy image into the trending channel.
+        # Never send group buy media into the trending channel.
         if use_image and (not is_trending_dest(int(dest_chat_id))):
-            await app.bot.send_photo(
-                chat_id=dest_chat_id,
-                photo=buy_file_id,
-                caption=local_msg,
-                parse_mode="HTML",
-                reply_markup=kb,
-            )
+            if buy_media_type == "animation":
+                await app.bot.send_animation(
+                    chat_id=dest_chat_id,
+                    animation=buy_file_id,
+                    caption=local_msg,
+                    parse_mode="HTML",
+                    reply_markup=kb,
+                )
+            elif buy_media_type == "video":
+                await app.bot.send_video(
+                    chat_id=dest_chat_id,
+                    video=buy_file_id,
+                    caption=local_msg,
+                    parse_mode="HTML",
+                    reply_markup=kb,
+                    supports_streaming=True,
+                )
+            else:
+                await app.bot.send_photo(
+                    chat_id=dest_chat_id,
+                    photo=buy_file_id,
+                    caption=local_msg,
+                    parse_mode="HTML",
+                    reply_markup=kb,
+                )
         else:
             await app.bot.send_message(
                 chat_id=dest_chat_id,
@@ -4272,11 +4382,13 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
 
 async def tracker_loop(app: Application):
     while True:
+        cycle_started = time.monotonic()
         try:
             await poll_once(app)
         except Exception as e:
             log.exception("tracker loop error: %s", e)
-        await asyncio.sleep(POLL_INTERVAL)
+        elapsed = time.monotonic() - cycle_started
+        await asyncio.sleep(max(0.10, POLL_INTERVAL - elapsed))
 
 
 
@@ -4641,7 +4753,7 @@ def main():
     application.add_handler(CommandHandler("adstatus", adstatus_cmd))
     application.add_handler(CallbackQueryHandler(on_replace_button, pattern=r"^(REPL_|CANCEL_REPL$)"))
     application.add_handler(CallbackQueryHandler(on_button))
-    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    application.add_handler(MessageHandler(filters.PHOTO | filters.ANIMATION | filters.VIDEO, handle_photo))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     application.add_handler(ChatMemberHandler(on_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
 
