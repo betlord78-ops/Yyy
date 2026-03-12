@@ -3628,10 +3628,11 @@ async def _set_token_now(chat_id: int, jetton: str, context: ContextTypes.DEFAUL
     safe_disp = re.sub(r"([_\*\[\]\(\)~`>#+\-=|{}.!])", r"\\\1", str(disp))
     lang = _get_group_lang(chat_id)
     lbl = _menu_labels(lang)
+    safe_sym = re.sub(r"([_\*\[\]\(\)~`>#+\-=|{}.!])", r"\\1", str(sym or ""))
     msg = (
         f"{lbl['token_added']}\n"
         f"• Token: *{safe_disp}*\n"
-        f"• Symbol: *{re.sub(r'([_\*\[\]\(\)~`>#+\-=|{}.!])', r'\\\1', str(sym or ''))}*\n\n"
+        f"• Symbol: *{safe_sym}*\n\n"
         f"{lbl['now_posting']}"
     )
 
