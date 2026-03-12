@@ -1845,6 +1845,143 @@ def dedust_extract_buys_from_tonapi_event(ev: Dict[str, Any], token_addr: str) -
         out.append({"tx": tx_hash, "buyer": buyer, "ton": ton_in, "token": jet_out, "symbol": out_symbol})
     return out
 
+
+# -------------------- SIMPLE GROUP MENU (PUMPTOOLS-STYLE) --------------------
+def _menu_labels(lang: str) -> Dict[str, str]:
+    ru = str(lang).lower().startswith("ru")
+    return {
+        "language": "🇷🇺 Язык" if ru else "🇺🇸 Language",
+        "edit": "✏️ Изменить" if ru else "✏️ Edit",
+        "add": "➕ Добавить токен" if ru else "➕ Add Token",
+        "view": "👀 Мои токены" if ru else "👀 View Tokens",
+        "edit_here": "✅ Редактировать" if ru else "✅ Edit Here",
+        "buy_step": "ℹ️ Шаг покупки" if ru else "ℹ️ Buy Step",
+        "min_buy": "ℹ️ Мин. покупка" if ru else "ℹ️ Min Buy",
+        "link": "ℹ️ Ссылка" if ru else "ℹ️ Link",
+        "emoji": "ℹ️ Эмодзи" if ru else "ℹ️ Emoji",
+        "media": "ℹ️ Медиа" if ru else "ℹ️ Media",
+        "return": "« Назад" if ru else "« Return",
+        "connected": "✅ *SpyTON BuyBot подключён*" if ru else "✅ *SpyTON BuyBot connected*",
+        "connected_desc": "Используйте меню ниже для настройки токена и buybot." if ru else "Use the menu below to configure your token and buybot settings.",
+        "paste_ca": "⬇️ Вставьте адрес контракта токена" if ru else "⬇️ Paste the token contract address",
+        "no_token": "Сначала добавьте токен через *Add Token*." if ru else "Add a token first using *Add Token*.",
+        "view_none": "Для этой группы токен ещё не добавлен." if ru else "No token added for this group yet.",
+        "send_buy_step": "Отправьте число для buy step." if ru else "Send buy step number.",
+        "send_min_buy": "Отправьте минимальную покупку в TON." if ru else "Send minimum buy in TON.",
+        "send_link": "Отправьте ссылку Telegram токена или `skip`." if ru else "Send token Telegram link or `skip`.",
+        "send_emoji": "Отправьте эмодзи." if ru else "Send emoji.",
+        "send_media": "Отправьте фото, GIF или видео. Отправьте `skip`, чтобы очистить." if ru else "Send photo, GIF, or video. Send `skip` to clear.",
+        "token_updated": "✅ Токен обновлён." if ru else "✅ Token updated.",
+        "token_added": "✅ Токен добавлен" if ru else "✅ Token Added",
+        "now_posting": "Теперь бот автоматически публикует покупки для этой группы.\nИспользуйте *Edit* для настройки токена." if ru else "Now posting buys automatically for this group.\nUse *Edit* to customize token settings.",
+        "admins_only": "Только для админов." if ru else "Admins only.",
+        "language_title": "Выберите язык" if ru else "Choose language",
+        "lang_saved_en": "Язык сохранён: English ✅" if ru else "Language saved: English ✅",
+        "lang_saved_ru": "Язык сохранён: Русский ✅" if ru else "Language saved: Russian ✅",
+    }
+
+def build_group_home_kb(chat_id: int, user_id: Optional[int] = None) -> InlineKeyboardMarkup:
+    lang = _get_group_lang(chat_id, user_id)
+    lbl = _menu_labels(lang)
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(lbl["language"], callback_data="MENU_LANG"),
+         InlineKeyboardButton(lbl["edit"], callback_data="MENU_EDIT")],
+        [InlineKeyboardButton(lbl["add"], callback_data="MENU_ADD"),
+         InlineKeyboardButton(lbl["view"], callback_data="MENU_VIEW")],
+    ])
+
+async def send_group_home(chat_id: int, context: ContextTypes.DEFAULT_TYPE, msg, edit: bool=False):
+    lang = _get_group_lang(chat_id, getattr(getattr(msg, "from_user", None), "id", None))
+    lbl = _menu_labels(lang)
+    text = lbl["connected"] + "\n\n" + lbl["connected_desc"]
+    if edit:
+        await msg.edit_text(text, reply_markup=build_group_home_kb(chat_id), parse_mode="Markdown")
+    else:
+        await msg.reply_text(text, reply_markup=build_group_home_kb(chat_id), parse_mode="Markdown")
+
+def build_edit_token_kb(chat_id: int, user_id: Optional[int] = None) -> InlineKeyboardMarkup:
+    g = get_group(chat_id)
+    tok = g.get("token") or {}
+    s = g.get("settings") or {}
+    lang = _get_group_lang(chat_id, user_id)
+    lbl = _menu_labels(lang)
+    link_state = "set" if str(tok.get("telegram") or "").strip() else ""
+    media_state = "📸" if str(s.get("buy_image_file_id") or "").strip() else ""
+    emoji_val = str(s.get("strength_emoji") or "🟢")
+    step_val = float(s.get("strength_step_ton") or 1)
+    min_val = float(s.get("min_buy_ton") or 0)
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(lbl["edit_here"], callback_data="EDIT_HOME")],
+        [InlineKeyboardButton(lbl["buy_step"], callback_data="EDIT_SET_BUY_STEP"),
+         InlineKeyboardButton(f"✏️ ({step_val:g})", callback_data="EDIT_SET_BUY_STEP")],
+        [InlineKeyboardButton(lbl["min_buy"], callback_data="EDIT_SET_MIN_BUY"),
+         InlineKeyboardButton(f"✏️ ({min_val:g})", callback_data="EDIT_SET_MIN_BUY")],
+        [InlineKeyboardButton(lbl["link"], callback_data="EDIT_SET_LINK"),
+         InlineKeyboardButton(f"✏️ ({link_state or 'set' if link_state else ''})", callback_data="EDIT_SET_LINK")],
+        [InlineKeyboardButton(lbl["emoji"], callback_data="EDIT_SET_EMOJI"),
+         InlineKeyboardButton(f"✏️ ({emoji_val})", callback_data="EDIT_SET_EMOJI")],
+        [InlineKeyboardButton(lbl["media"], callback_data="EDIT_SET_MEDIA"),
+         InlineKeyboardButton(f"✏️ ({media_state})", callback_data="EDIT_SET_MEDIA")],
+        [InlineKeyboardButton(lbl["return"], callback_data="MENU_HOME")],
+    ])
+
+async def send_edit_token_page(chat_id: int, context: ContextTypes.DEFAULT_TYPE, msg, edit: bool=False):
+    g = get_group(chat_id)
+    tok = g.get("token") or {}
+    lang = _get_group_lang(chat_id, getattr(getattr(msg, "from_user", None), "id", None))
+    lbl = _menu_labels(lang)
+    if not isinstance(tok, dict) or not tok:
+        if edit:
+            await msg.edit_text(lbl["no_token"], reply_markup=build_group_home_kb(chat_id), parse_mode="Markdown")
+        else:
+            await msg.reply_text(lbl["no_token"], reply_markup=build_group_home_kb(chat_id), parse_mode="Markdown")
+        return
+    s = g.get("settings") or {}
+    name = html.escape(str(tok.get("name") or tok.get("symbol") or "Token"))
+    addr = html.escape(str(tok.get("address") or ""))
+    link_state = "set" if str(tok.get("telegram") or "").strip() else "not set"
+    media_state = "set" if str(s.get("buy_image_file_id") or "").strip() else "not set"
+    emoji_val = html.escape(str(s.get("strength_emoji") or "🟢"))
+    step_val = float(s.get("strength_step_ton") or 1)
+    min_val = float(s.get("min_buy_ton") or 0)
+    text = (
+        f"Customize your Token\n\n"
+        f"<code>{addr}</code>\n\n"
+        f"Name: <b>{name}</b>\n\n"
+        f"✅ Edit Here\n\n"
+        f"ℹ️ Buy Step: {step_val:g}\n"
+        f"ℹ️ Min Buy: {min_val:g}\n"
+        f"ℹ️ Link: {link_state}\n"
+        f"ℹ️ Emoji: {emoji_val}\n"
+        f"ℹ️ Media: {media_state}"
+    )
+    if edit:
+        await msg.edit_text(text, reply_markup=build_edit_token_kb(chat_id), parse_mode="HTML")
+    else:
+        await msg.reply_text(text, reply_markup=build_edit_token_kb(chat_id), parse_mode="HTML")
+
+async def send_view_token_page(chat_id: int, context: ContextTypes.DEFAULT_TYPE, msg, edit: bool=False):
+    g = get_group(chat_id)
+    tok = g.get("token") or {}
+    lang = _get_group_lang(chat_id, getattr(getattr(msg, "from_user", None), "id", None))
+    lbl = _menu_labels(lang)
+    if not isinstance(tok, dict) or not tok:
+        text = lbl["view_none"]
+    else:
+        text = (
+            f"Token: <b>{html.escape(str(tok.get('name') or tok.get('symbol') or 'Token'))}</b>\n"
+            f"Symbol: <b>{html.escape(str(tok.get('symbol') or ''))}</b>\n"
+            f"Address:\n<code>{html.escape(str(tok.get('address') or ''))}</code>"
+        )
+        tg = str(tok.get("telegram") or "").strip()
+        if tg:
+            text += f"\nTelegram: {html.escape(tg)}"
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton(lbl["return"], callback_data="MENU_HOME")]])
+    if edit:
+        await msg.edit_text(text, reply_markup=kb, parse_mode="HTML", disable_web_page_preview=True)
+    else:
+        await msg.reply_text(text, reply_markup=kb, parse_mode="HTML", disable_web_page_preview=True)
+
 # -------------------- UI --------------------
 async def build_add_to_group_url(app: Application) -> str:
     # We try to discover bot username at runtime.
@@ -1855,111 +1992,6 @@ async def build_add_to_group_url(app: Application) -> str:
     except Exception:
         pass
     return "https://t.me/"  # fallback
-
-
-
-def build_group_main_menu(lang: str) -> InlineKeyboardMarkup:
-    lang = "ru" if str(lang).lower().startswith("ru") else "en"
-    if lang == "ru":
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton("🇷🇺 Язык", callback_data="NEW_LANG_GROUP"), InlineKeyboardButton("✏️ Изменить", callback_data="NEW_EDIT_GROUP")],
-            [InlineKeyboardButton("➕ Добавить токен", callback_data="NEW_ADD_TOKEN"), InlineKeyboardButton("👀 Токены", callback_data="NEW_VIEW_TOKENS")],
-        ])
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🇺🇸 Language", callback_data="NEW_LANG_GROUP"), InlineKeyboardButton("✏️ Edit", callback_data="NEW_EDIT_GROUP")],
-        [InlineKeyboardButton("➕ Add Token", callback_data="NEW_ADD_TOKEN"), InlineKeyboardButton("👀 View Tokens", callback_data="NEW_VIEW_TOKENS")],
-    ])
-
-
-def group_welcome_text(lang: str) -> str:
-    if str(lang).lower().startswith("ru"):
-        return (
-            "✅ *SpyTON BuyBot подключён*\n\n"
-            "Используйте меню ниже для настройки токена и параметров buybot."
-        )
-    return (
-        "✅ *SpyTON BuyBot connected*\n\n"
-        "Use the menu below to configure your token and buybot settings."
-    )
-
-
-async def send_group_home(chat_id: int, context: ContextTypes.DEFAULT_TYPE, msg=None, edit: bool=False, user_id: Optional[int]=None):
-    lang = _get_group_lang(chat_id, user_id)
-    kb = build_group_main_menu(lang)
-    text = group_welcome_text(lang)
-    if edit and msg is not None:
-        await msg.edit_text(text, reply_markup=kb, parse_mode="Markdown")
-    elif msg is not None:
-        await msg.reply_text(text, reply_markup=kb, parse_mode="Markdown")
-    else:
-        await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb, parse_mode="Markdown")
-
-
-def build_edit_menu_text(chat_id: int, lang: str) -> str:
-    g = get_group(chat_id)
-    tok = g.get("token") if isinstance(g, dict) else None
-    s = g.get("settings") or DEFAULT_SETTINGS
-    token_title = "No token" if lang == "en" else "Токен не добавлен"
-    if isinstance(tok, dict):
-        token_title = (tok.get("name") or tok.get("symbol") or tok.get("address") or token_title)
-    buy_step = s.get("strength_step_ton", 1)
-    min_buy = s.get("min_buy_ton", 0.0)
-    tg = "set" if isinstance(tok, dict) and (tok.get("telegram") or "").strip() else "not set"
-    emoji = s.get("strength_emoji", "🟢")
-    media = "set" if (s.get("buy_image_file_id") or "").strip() else "not set"
-    if str(lang).lower().startswith("ru"):
-        return (
-            f"*Настройка токена*\n\n"
-            f"*{html.escape(str(token_title))}*\n\n"
-            f"✅ *Изменить здесь*\n\n"
-            f"ℹ️ Шаг покупки: `{buy_step}`\n"
-            f"ℹ️ Мин. покупка: `{min_buy}`\n"
-            f"ℹ️ Ссылка: `{tg}`\n"
-            f"ℹ️ Эмодзи: `{emoji}`\n"
-            f"ℹ️ Медиа: `{media}`"
-        )
-    return (
-        f"*Customize your Token*\n\n"
-        f"*{html.escape(str(token_title))}*\n\n"
-        f"✅ *Edit Here*\n\n"
-        f"ℹ️ Buy Step: `{buy_step}`\n"
-        f"ℹ️ Min Buy: `{min_buy}`\n"
-        f"ℹ️ Link: `{tg}`\n"
-        f"ℹ️ Emoji: `{emoji}`\n"
-        f"ℹ️ Media: `{media}`"
-    )
-
-
-def build_edit_menu_kb(lang: str) -> InlineKeyboardMarkup:
-    if str(lang).lower().startswith("ru"):
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Изменить здесь", callback_data="NOOP")],
-            [InlineKeyboardButton("ℹ️ Шаг покупки", callback_data="TS_EMO"), InlineKeyboardButton("✏️ (1)", callback_data="TS_EMO")],
-            [InlineKeyboardButton("ℹ️ Мин. покупка", callback_data="TS_MIN"), InlineKeyboardButton("✏️ (0.25)", callback_data="TS_MIN")],
-            [InlineKeyboardButton("ℹ️ Ссылка", callback_data="TS_SOC"), InlineKeyboardButton("✏️ (set)", callback_data="TS_SOC")],
-            [InlineKeyboardButton("ℹ️ Эмодзи", callback_data="TS_EMO"), InlineKeyboardButton("✏️ (🟢)", callback_data="TS_EMO")],
-            [InlineKeyboardButton("ℹ️ Медиа", callback_data="TS_MEDIA"), InlineKeyboardButton("✏️ (🎥)", callback_data="TS_MEDIA")],
-            [InlineKeyboardButton("« Назад", callback_data="NEW_BACK_HOME")],
-        ])
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Edit Here", callback_data="NOOP")],
-        [InlineKeyboardButton("ℹ️ Buy Step", callback_data="TS_EMO"), InlineKeyboardButton("✏️ (1)", callback_data="TS_EMO")],
-        [InlineKeyboardButton("ℹ️ Min Buy", callback_data="TS_MIN"), InlineKeyboardButton("✏️ (0.25)", callback_data="TS_MIN")],
-        [InlineKeyboardButton("ℹ️ Link", callback_data="TS_SOC"), InlineKeyboardButton("✏️ (set)", callback_data="TS_SOC")],
-        [InlineKeyboardButton("ℹ️ Emoji", callback_data="TS_EMO"), InlineKeyboardButton("✏️ (🟢)", callback_data="TS_EMO")],
-        [InlineKeyboardButton("ℹ️ Media", callback_data="TS_MEDIA"), InlineKeyboardButton("✏️ (🎥)", callback_data="TS_MEDIA")],
-        [InlineKeyboardButton("« Return", callback_data="NEW_BACK_HOME")],
-    ])
-
-
-async def send_new_edit_menu(chat_id: int, context: ContextTypes.DEFAULT_TYPE, msg, edit: bool=True, user_id: Optional[int]=None):
-    lang = _get_group_lang(chat_id, user_id)
-    text = build_edit_menu_text(chat_id, lang)
-    kb = build_edit_menu_kb(lang)
-    if edit:
-        await msg.edit_text(text, parse_mode="Markdown", reply_markup=kb, disable_web_page_preview=True)
-    else:
-        await msg.reply_text(text, parse_mode="Markdown", reply_markup=kb, disable_web_page_preview=True)
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
@@ -1999,7 +2031,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
     else:
-        await send_group_home(chat.id, context, update.message, edit=False, user_id=update.effective_user.id if update.effective_user else None)
+        await send_group_home(chat.id, context, update.message)
 
 
 async def lang_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2348,88 +2380,30 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("LANG_SET_"):
         lang_code = data.split("_", 2)[2] if "_" in data else "en"
-        set_user_lang(user.id, lang_code)
-        new_lang = _get_user_lang(user.id)
+        if chat.type == "private":
+            set_user_lang(user.id, lang_code)
+            new_lang = _get_user_lang(user.id)
+            try:
+                await q.answer(t("lang_set_ok_ru", new_lang) if new_lang=="ru" else t("lang_set_ok", new_lang), show_alert=False)
+            except Exception:
+                pass
+            add_url = await build_add_to_group_url(context.application)
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton(t("btn_add_group", new_lang), url=add_url)],
+                [InlineKeyboardButton(t("btn_cfg_token", new_lang), callback_data="CFG_PRIVATE")],
+                [InlineKeyboardButton(t("btn_settings", new_lang), callback_data="SET_PRIVATE")],
+                [InlineKeyboardButton(t("btn_language", new_lang), callback_data="LANG_PRIVATE")],
+                [InlineKeyboardButton(t("btn_support", new_lang), url="https://t.me/SpyTonEco")],
+            ])
+            await q.edit_message_text(t("start_title", new_lang) + "\n" + t("start_desc", new_lang), reply_markup=kb, parse_mode="Markdown")
+            return
+        set_group_lang(chat.id, lang_code)
+        new_lang = _get_group_lang(chat.id, user.id)
         try:
-            await q.answer(t("lang_set_ok_ru", new_lang) if new_lang=="ru" else t("lang_set_ok", new_lang), show_alert=False)
+            await q.answer(_menu_labels(new_lang)["lang_saved_ru"] if new_lang=="ru" else _menu_labels(new_lang)["lang_saved_en"], show_alert=False)
         except Exception:
             pass
-        add_url = await build_add_to_group_url(context.application)
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(t("btn_add_group", new_lang), url=add_url)],
-            [InlineKeyboardButton(t("btn_cfg_token", new_lang), callback_data="CFG_PRIVATE")],
-            [InlineKeyboardButton(t("btn_settings", new_lang), callback_data="SET_PRIVATE")],
-            [InlineKeyboardButton(t("btn_language", new_lang), callback_data="LANG_PRIVATE")],
-            [InlineKeyboardButton(t("btn_support", new_lang), url="https://t.me/SpyTonEco")],
-        ])
-        await q.edit_message_text(t("start_title", new_lang) + "\n" + t("start_desc", new_lang), reply_markup=kb, parse_mode="Markdown")
-        return
-
-    if data == "NOOP":
-        return
-
-    if data == "NEW_LANG_GROUP":
-        lang = _get_group_lang(chat.id, user.id)
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(t("lang_en", lang), callback_data="NEW_LANG_SET_en")],
-            [InlineKeyboardButton(t("lang_ru", lang), callback_data="NEW_LANG_SET_ru")],
-            [InlineKeyboardButton("« Return" if lang == "en" else "« Назад", callback_data="NEW_BACK_HOME")],
-        ])
-        await q.edit_message_text(t("lang_title", lang), reply_markup=kb)
-        return
-
-    if data.startswith("NEW_LANG_SET_"):
-        lang_code = data.split("_", 3)[3] if "_" in data else "en"
-        set_group_lang(chat.id, lang_code)
-        await send_group_home(chat.id, context, q.message, edit=True, user_id=user.id)
-        return
-
-    if data == "NEW_BACK_HOME":
-        await send_group_home(chat.id, context, q.message, edit=True, user_id=user.id)
-        return
-
-    if data == "NEW_ADD_TOKEN":
-        if not await is_admin(context.bot, chat.id, user.id):
-            await q.answer("Admins only.", show_alert=True)
-            return
-        bot_username = await get_bot_username(context.bot)
-        deep = f"https://t.me/{bot_username}?start=cfg_{chat.id}"
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("Click Here!", url=deep)]])
-        txt = "To continue, click *Click Here!* and send your token CA in DM."
-        if _get_group_lang(chat.id, user.id) == "ru":
-            txt = "Чтобы продолжить, нажмите *Click Here!* и отправьте адрес токена в ЛС."
-        await q.message.reply_text(txt, parse_mode="Markdown", reply_markup=kb)
-        return
-
-    if data == "NEW_EDIT_GROUP":
-        if not await is_admin(context.bot, chat.id, user.id):
-            await q.answer("Admins only.", show_alert=True)
-            return
-        await send_new_edit_menu(chat.id, context, q.message, edit=True, user_id=user.id)
-        return
-
-    if data == "NEW_VIEW_TOKENS":
-        g = get_group(chat.id)
-        tok = g.get("token") if isinstance(g, dict) else None
-        lang = _get_group_lang(chat.id, user.id)
-        if not isinstance(tok, dict):
-            txt = "No token configured yet." if lang == "en" else "Токен ещё не настроен."
-        else:
-            txt = (
-                f"*Token*\n"
-                f"Name: *{html.escape(tok.get('name') or tok.get('symbol') or 'TOKEN')}*\n"
-                f"Address: `{tok.get('address') or ''}`\n"
-                f"DEX: `{tok.get('dex_mode') or 'both'}`"
-            )
-            if lang == "ru":
-                txt = (
-                    f"*Токен*\n"
-                    f"Имя: *{html.escape(tok.get('name') or tok.get('symbol') or 'TOKEN')}*\n"
-                    f"Адрес: `{tok.get('address') or ''}`\n"
-                    f"DEX: `{tok.get('dex_mode') or 'both'}`"
-                )
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("« Return" if lang == "en" else "« Назад", callback_data="NEW_BACK_HOME")]])
-        await q.edit_message_text(txt, parse_mode="Markdown", reply_markup=kb, disable_web_page_preview=True)
+        await send_group_home(chat.id, context, q.message, edit=True)
         return
 
     if data in ("CFG_PRIVATE","SET_PRIVATE"):
@@ -2442,20 +2416,86 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    if data == "CFG_GROUP":
-        # Crypton-style: group button opens DM config (deep-link) so you don't have to reply in group.
-        if not await is_admin(context.bot, chat.id, user.id):
-            await q.answer("Admins only.", show_alert=True)
+    if data in ("MENU_HOME", "CFG_GROUP"):
+        if chat.type in ("group", "supergroup") and not await is_admin(context.bot, chat.id, user.id):
+            await q.answer(_menu_labels(_get_group_lang(chat.id, user.id))["admins_only"], show_alert=True)
             return
-        bot_username = await get_bot_username(context.bot)
-        deep = f"https://t.me/{bot_username}?start=cfg_{chat.id}"
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("Click Here!", url=deep)]])
-        await q.message.reply_text(
-            "To continue, click *Click Here!* and send your token CA in DM.",
-            parse_mode="Markdown",
-            reply_markup=kb,
-        )
-        await q.answer()
+        await send_group_home(chat.id, context, q.message, edit=True)
+        return
+
+    if data == "MENU_LANG":
+        lang = _get_group_lang(chat.id, user.id)
+        cur = "ru" if str(lang).startswith("ru") else "en"
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(("🇬🇧 English ✅" if cur=="en" else "🇬🇧 English"), callback_data="LANG_SET_en")],
+            [InlineKeyboardButton(("🇷🇺 Russian ✅" if cur=="ru" else "🇷🇺 Russian"), callback_data="LANG_SET_ru")],
+            [InlineKeyboardButton(_menu_labels(lang)["return"], callback_data="MENU_HOME")],
+        ])
+        await q.edit_message_text(_menu_labels(lang)["language_title"], reply_markup=kb)
+        return
+
+    if data == "MENU_ADD":
+        if not await is_admin(context.bot, chat.id, user.id):
+            await q.answer(_menu_labels(_get_group_lang(chat.id, user.id))["admins_only"], show_alert=True)
+            return
+        AWAITING[user.id] = {"group_id": chat.id, "stage": "CA", "dex": "both"}
+        await q.message.reply_text(_menu_labels(_get_group_lang(chat.id, user.id))["paste_ca"])
+        return
+
+    if data == "MENU_EDIT":
+        if not await is_admin(context.bot, chat.id, user.id):
+            await q.answer(_menu_labels(_get_group_lang(chat.id, user.id))["admins_only"], show_alert=True)
+            return
+        await send_edit_token_page(chat.id, context, q.message, edit=True)
+        return
+
+    if data == "MENU_VIEW":
+        await send_view_token_page(chat.id, context, q.message, edit=True)
+        return
+
+    if data == "EDIT_HOME":
+        await send_edit_token_page(chat.id, context, q.message, edit=True)
+        return
+
+    if data == "EDIT_SET_BUY_STEP":
+        if not await is_admin(context.bot, chat.id, user.id):
+            await q.answer(_menu_labels(_get_group_lang(chat.id, user.id))["admins_only"], show_alert=True)
+            return
+        AWAITING[user.id] = {"group_id": chat.id, "stage": "EDIT_BUY_STEP"}
+        await q.message.reply_text(_menu_labels(_get_group_lang(chat.id, user.id))["send_buy_step"])
+        return
+
+    if data == "EDIT_SET_MIN_BUY":
+        if not await is_admin(context.bot, chat.id, user.id):
+            await q.answer(_menu_labels(_get_group_lang(chat.id, user.id))["admins_only"], show_alert=True)
+            return
+        AWAITING[user.id] = {"group_id": chat.id, "stage": "EDIT_MIN_BUY"}
+        await q.message.reply_text(_menu_labels(_get_group_lang(chat.id, user.id))["send_min_buy"])
+        return
+
+    if data == "EDIT_SET_LINK":
+        if not await is_admin(context.bot, chat.id, user.id):
+            await q.answer(_menu_labels(_get_group_lang(chat.id, user.id))["admins_only"], show_alert=True)
+            return
+        AWAITING[user.id] = {"group_id": chat.id, "stage": "EDIT_LINK"}
+        await q.message.reply_text(_menu_labels(_get_group_lang(chat.id, user.id))["send_link"], parse_mode="Markdown")
+        return
+
+    if data == "EDIT_SET_EMOJI":
+        if not await is_admin(context.bot, chat.id, user.id):
+            await q.answer(_menu_labels(_get_group_lang(chat.id, user.id))["admins_only"], show_alert=True)
+            return
+        AWAITING[user.id] = {"group_id": chat.id, "stage": "EDIT_EMOJI"}
+        await q.message.reply_text(_menu_labels(_get_group_lang(chat.id, user.id))["send_emoji"])
+        return
+
+    if data == "EDIT_SET_MEDIA":
+        if not await is_admin(context.bot, chat.id, user.id):
+            await q.answer(_menu_labels(_get_group_lang(chat.id, user.id))["admins_only"], show_alert=True)
+            return
+        AWAITING[user.id] = {"group_id": chat.id, "stage": "EDIT_MEDIA"}
+        AWAITING_IMAGE[user.id] = chat.id
+        await q.message.reply_text(_menu_labels(_get_group_lang(chat.id, user.id))["send_media"])
         return
 
 
@@ -2766,7 +2806,7 @@ async def handle_token_settings_button(chat_id: int, data: str, update: Update, 
 
     # Back to group menu
     if data == "TS_BACK":
-        await send_new_edit_menu(chat_id, context, msg, edit=True, user_id=update.effective_user.id if update.effective_user else None)
+        await send_token_settings(chat_id, context, msg, edit=True)
         return
 
     # ----- Min Buy -----
@@ -3132,6 +3172,74 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     text = (update.message.text or "").strip()
 
+    # New simple edit flow (group or DM by admin)
+    cfg = AWAITING.get(user.id) if isinstance(AWAITING.get(user.id), dict) else None
+    if cfg and str(cfg.get("stage") or "").startswith("EDIT_"):
+        target_chat_id = int(cfg.get("group_id") or 0)
+        if target_chat_id and await is_admin(context.bot, target_chat_id, user.id):
+            g = get_group(target_chat_id)
+            s = g.get("settings") or {}
+            tok = g.get("token") or {}
+            stage = str(cfg.get("stage") or "")
+            try:
+                if stage == "EDIT_BUY_STEP":
+                    val = float(text)
+                    if val <= 0:
+                        raise ValueError
+                    s["strength_step_ton"] = val
+                elif stage == "EDIT_MIN_BUY":
+                    val = float(text)
+                    if val < 0:
+                        raise ValueError
+                    s["min_buy_unit"] = "TON"
+                    s["min_buy_ton"] = val
+                elif stage == "EDIT_LINK":
+                    if text.lower() == "skip":
+                        tok["telegram"] = ""
+                    else:
+                        m = re.search(r"(https?://t\.me/[A-Za-z0-9_]{3,}(?:\S*)?|@?[A-Za-z0-9_]{3,})", text)
+                        if not m:
+                            await update.message.reply_text(_menu_labels(_get_group_lang(target_chat_id, user.id))["send_link"], parse_mode="Markdown")
+                            return
+                        raw = m.group(1)
+                        if raw.startswith("@"):
+                            tok["telegram"] = f"https://t.me/{raw[1:]}"
+                        elif raw.startswith("http"):
+                            tok["telegram"] = raw
+                        else:
+                            tok["telegram"] = f"https://{raw}"
+                elif stage == "EDIT_EMOJI":
+                    tok_emoji = text.strip()
+                    if not tok_emoji or len(tok_emoji) > 20:
+                        await update.message.reply_text(_menu_labels(_get_group_lang(target_chat_id, user.id))["send_emoji"])
+                        return
+                    s["strength_emoji"] = tok_emoji
+                elif stage == "EDIT_MEDIA":
+                    if text.lower() == "skip":
+                        s["buy_image_on"] = False
+                        s["buy_image_file_id"] = ""
+                        s["buy_media_type"] = "photo"
+                    else:
+                        await update.message.reply_text(_menu_labels(_get_group_lang(target_chat_id, user.id))["send_media"])
+                        return
+                save_groups()
+                AWAITING.pop(user.id, None)
+                if stage == "EDIT_MEDIA" and text.lower() != "skip":
+                    return
+                await update.message.reply_text(_menu_labels(_get_group_lang(target_chat_id, user.id))["token_updated"])
+                await send_edit_token_page(target_chat_id, context, update.message)
+                return
+            except Exception:
+                prompt_map = {
+                    "EDIT_BUY_STEP": "send_buy_step",
+                    "EDIT_MIN_BUY": "send_min_buy",
+                    "EDIT_LINK": "send_link",
+                    "EDIT_EMOJI": "send_emoji",
+                    "EDIT_MEDIA": "send_media",
+                }
+                await update.message.reply_text(_menu_labels(_get_group_lang(target_chat_id, user.id))[prompt_map.get(stage, "send_buy_step")], parse_mode="Markdown")
+                return
+
     # "ca" shortcut in groups: show currently configured token address (like listing bots)
     if chat.type in ("group", "supergroup") and text.lower() == "ca":
         g = get_group(chat.id)
@@ -3301,7 +3409,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_groups()
     AWAITING_IMAGE.pop(user.id, None)
 
-    await update.message.reply_text(f"✅ Buy media saved ({media_type}). Image mode is now ON.")
+    await update.message.reply_text(_menu_labels(_get_group_lang(target_chat_id, user.id))["token_updated"])
+    await send_edit_token_page(target_chat_id, context, update.message)
 
 async def configure_group_token(chat_id: int, jetton: str, context: ContextTypes.DEFAULT_TYPE, reply_to_chat: int, telegram: str = "", dex_mode: str = "both"):
     g = get_group(chat_id)
@@ -3517,20 +3626,20 @@ async def _set_token_now(chat_id: int, jetton: str, context: ContextTypes.DEFAUL
 
     disp = sym or name or "TOKEN"
     safe_disp = re.sub(r"([_\*\[\]\(\)~`>#+\-=|{}.!])", r"\\\1", str(disp))
+    lang = _get_group_lang(chat_id)
+    lbl = _menu_labels(lang)
     msg = (
-        f"✅ *Token Added*\n"
+        f"{lbl['token_added']}\n"
         f"• Token: *{safe_disp}*\n"
-        f"• Address: `{jetton}`\n"
-        f"• STON.fi pool: `{ston_pool or 'NONE'}`\n"
-        f"• DeDust pool: `{dedust_pool or 'NONE'}`\n\n"
-        f"Now posting buys automatically for this group.\n"
-        f"Use *Settings* to set buy strength & image."
+        f"• Symbol: *{re.sub(r'([_\*\[\]\(\)~`>#+\-=|{}.!])', r'\\\1', str(sym or ''))}*\n\n"
+        f"{lbl['now_posting']}"
     )
 
     await context.bot.send_message(
         chat_id=reply_chat_id,
         text=msg,
         parse_mode="Markdown",
+        reply_markup=build_group_home_kb(chat_id),
         disable_web_page_preview=True,
     )
     if reply_chat_id != chat_id:
@@ -3538,6 +3647,7 @@ async def _set_token_now(chat_id: int, jetton: str, context: ContextTypes.DEFAUL
             chat_id=chat_id,
             text=msg,
             parse_mode="Markdown",
+            reply_markup=build_group_home_kb(chat_id),
             disable_web_page_preview=True,
         )
 
@@ -4832,7 +4942,12 @@ async def on_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if chat.type not in ("group","supergroup"):
             return
         if new and new.status in ("member","administrator"):
-            await send_group_home(chat.id, context, None, edit=False)
+            await context.bot.send_message(
+                chat_id=chat.id,
+                text=_menu_labels(_get_group_lang(chat.id))["connected"] + "\n\n" + _menu_labels(_get_group_lang(chat.id))["connected_desc"],
+                reply_markup=build_group_home_kb(chat.id),
+                parse_mode="Markdown"
+            )
     except Exception:
         return
 
