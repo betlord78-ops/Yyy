@@ -1846,123 +1846,6 @@ def dedust_extract_buys_from_tonapi_event(ev: Dict[str, Any], token_addr: str) -
     return out
 
 # -------------------- UI --------------------
-def _group_menu_text(lang: str) -> str:
-    if str(lang).lower().startswith("ru"):
-        return "✅ *SpyTON BuyBot подключён*\n\nВыберите действие ниже."
-    return "✅ *SpyTON BuyBot connected*\n\nChoose an action below."
-
-
-def build_group_main_kb(lang: str) -> InlineKeyboardMarkup:
-    ru = str(lang).lower().startswith("ru")
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🇷🇺 Язык" if ru else "🇺🇸 Language", callback_data="LANG_GROUP"),
-            InlineKeyboardButton("✏️ Редактировать" if ru else "✏️ Edit", callback_data="EDIT_GROUP"),
-        ],
-        [
-            InlineKeyboardButton("➕ Добавить токен" if ru else "➕ Add Token", callback_data="ADD_GROUP"),
-            InlineKeyboardButton("👀 Мои токены" if ru else "👀 View Tokens", callback_data="VIEWTOKENS_GROUP"),
-        ],
-    ])
-
-
-def _build_edit_here_kb(chat_id: int) -> InlineKeyboardMarkup:
-    g = get_group(chat_id)
-    tok = g.get("token") if isinstance(g, dict) else None
-    s = g.get("settings") or DEFAULT_SETTINGS
-    lang = _get_group_lang(chat_id)
-    ru = str(lang).lower().startswith("ru")
-    buy_step = s.get("strength_step_ton", 1)
-    min_buy = s.get("min_buy_ton", 0.25)
-    tg_set = bool(isinstance(tok, dict) and (tok.get("telegram") or "").strip())
-    emoji = str(s.get("strength_emoji") or "🟢")
-    media_on = bool(s.get("buy_image_on", False) and (s.get("buy_image_file_id") or "").strip())
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Edit Here" if not ru else "✅ Редактировать", callback_data="EDITPAGE_1")],
-        [
-            InlineKeyboardButton("ℹ️ Buy Step" if not ru else "ℹ️ Шаг покупки", callback_data="EDITSET_BUYSTEP"),
-            InlineKeyboardButton(f"✏️ ({buy_step:g})", callback_data="EDITSET_BUYSTEP"),
-        ],
-        [
-            InlineKeyboardButton("ℹ️ Min Buy" if not ru else "ℹ️ Мин. покупка", callback_data="EDITSET_MINBUY"),
-            InlineKeyboardButton(f"✏️ ({min_buy:g})", callback_data="EDITSET_MINBUY"),
-        ],
-        [
-            InlineKeyboardButton("ℹ️ Link" if not ru else "ℹ️ Ссылка", callback_data="EDITSET_LINK"),
-            InlineKeyboardButton("✏️ (set)" if tg_set else "✏️ ()", callback_data="EDITSET_LINK"),
-        ],
-        [
-            InlineKeyboardButton("ℹ️ Emoji" if not ru else "ℹ️ Эмодзи", callback_data="EDITSET_EMOJI"),
-            InlineKeyboardButton(f"✏️ ({emoji})", callback_data="EDITSET_EMOJI"),
-        ],
-        [
-            InlineKeyboardButton("ℹ️ Media" if not ru else "ℹ️ Медиа", callback_data="EDITSET_MEDIA"),
-            InlineKeyboardButton("✏️ (📸)" if media_on else "✏️ ()", callback_data="EDITSET_MEDIA"),
-        ],
-        [InlineKeyboardButton("« Return" if not ru else "« Назад", callback_data="MENU_GROUP_HOME")],
-    ])
-
-
-def _build_value_pick_kb(prefix: str, values: list[str], back: str = "EDIT_GROUP") -> InlineKeyboardMarkup:
-    rows = []
-    cur = []
-    for value in values:
-        cur.append(InlineKeyboardButton(value, callback_data=f"{prefix}{value}"))
-        if len(cur) == 3:
-            rows.append(cur)
-            cur = []
-    if cur:
-        rows.append(cur)
-    rows.append([InlineKeyboardButton("« Return", callback_data=back)])
-    return InlineKeyboardMarkup(rows)
-
-
-async def send_edit_token_menu(chat_id: int, context: ContextTypes.DEFAULT_TYPE, msg, edit: bool = False):
-    g = get_group(chat_id)
-    tok = g.get("token") if isinstance(g, dict) else None
-    lang = _get_group_lang(chat_id)
-    ru = str(lang).lower().startswith("ru")
-    if not isinstance(tok, dict):
-        text = "Токен ещё не добавлен. Сначала нажмите Add Token." if ru else "No token configured yet. Use Add Token first."
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("« Назад" if ru else "« Return", callback_data="MENU_GROUP_HOME")]])
-    else:
-        label = str(tok.get("name") or tok.get("symbol") or "TOKEN").strip()
-        ca = str(tok.get("address") or "").strip()
-        text = (f"Настройте ваш токен\n\n<code>{ca}</code>\n\nИмя: <b>{html.escape(label)}</b>" if ru else f"Customize your Token\n\n<code>{ca}</code>\n\nName: <b>{html.escape(label)}</b>")
-        kb = _build_edit_here_kb(chat_id)
-    if edit:
-        await msg.edit_text(text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
-    else:
-        await msg.reply_text(text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
-
-
-async def send_view_tokens_menu(chat_id: int, context: ContextTypes.DEFAULT_TYPE, msg, edit: bool = False):
-    g = get_group(chat_id)
-    tok = g.get("token") if isinstance(g, dict) else None
-    lang = _get_group_lang(chat_id)
-    ru = str(lang).lower().startswith("ru")
-    if not isinstance(tok, dict):
-        text = "Токены ещё не добавлены. Сначала нажмите Add Token." if ru else "No tracked tokens yet. Use Add Token first."
-    else:
-        label = str(tok.get("name") or tok.get("symbol") or "TOKEN").strip()
-        ca = str(tok.get("address") or "").strip()
-        ston = str(tok.get("ston_pool") or "NONE")
-        dedust = str(tok.get("dedust_pool") or "NONE")
-        text = (
-            (f"Текущий токен\n\nИмя: <b>{html.escape(label)}</b>\nCA: <code>{ca}</code>\n\nSTON.fi: <code>{ston}</code>\nDeDust: <code>{dedust}</code>")
-            if ru else
-            (f"Tracked Token\n\nName: <b>{html.escape(label)}</b>\nCA: <code>{ca}</code>\n\nSTON.fi: <code>{ston}</code>\nDeDust: <code>{dedust}</code>")
-        )
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✏️ Редактировать" if ru else "✏️ Edit", callback_data="EDIT_GROUP")],
-        [InlineKeyboardButton("« Назад" if ru else "« Return", callback_data="MENU_GROUP_HOME")],
-    ])
-    if edit:
-        await msg.edit_text(text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
-    else:
-        await msg.reply_text(text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
-
-
 async def build_add_to_group_url(app: Application) -> str:
     # We try to discover bot username at runtime.
     try:
@@ -1972,6 +1855,29 @@ async def build_add_to_group_url(app: Application) -> str:
     except Exception:
         pass
     return "https://t.me/"  # fallback
+
+
+def build_group_home_kb(lang: str) -> InlineKeyboardMarkup:
+    lang_btn = "🇺🇸 Language" if lang == "en" else "🇷🇺 Язык"
+    edit_btn = "✏️ Edit" if lang == "en" else "✏️ Редактировать"
+    add_btn = "➕ Add Token" if lang == "en" else "➕ Добавить токен"
+    view_btn = "👀 View Tokens" if lang == "en" else "👀 Токены"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(lang_btn, callback_data="MENU_LANG_GROUP"), InlineKeyboardButton(edit_btn, callback_data="MENU_EDIT_GROUP")],
+        [InlineKeyboardButton(add_btn, callback_data="MENU_ADD_GROUP"), InlineKeyboardButton(view_btn, callback_data="MENU_VIEW_GROUP")],
+    ])
+
+
+def build_group_home_text(lang: str) -> str:
+    if lang == "ru":
+        return (
+            "✅ *SpyTON BuyBot подключен*\n\n"
+            "Выберите действие ниже. Добавление и настройка токена теперь открываются в новом стиле меню."
+        )
+    return (
+        "✅ *SpyTON BuyBot connected*\n\n"
+        "Choose an option below. Token adding and editing now use the new menu style."
+    )
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
@@ -2011,18 +1917,10 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
     else:
-        # In group, show group menu
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("⚙️ Configure Token", callback_data="CFG_GROUP")],
-            [InlineKeyboardButton("⚙️ Token Settings", callback_data="TOKENSET_GROUP")],
-            [InlineKeyboardButton("🛠 Settings", callback_data="SET_GROUP")],
-            [InlineKeyboardButton("📊 Status", callback_data="STATUS_GROUP")],
-            [InlineKeyboardButton("🗑 Remove Token", callback_data="REMOVE_GROUP")],
-        ])
+        lang = _get_group_lang(chat.id, user.id if user else None)
         await update.message.reply_text(
-            "✅ *SpyTON BuyBot connected*\n\n"
-            "Tap *Configure Token* to set the token, or type `ca` anytime to show the token address.",
-            reply_markup=kb,
+            build_group_home_text(lang),
+            reply_markup=build_group_home_kb(lang),
             parse_mode="Markdown"
         )
 
@@ -2362,32 +2260,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     data = q.data or ""
-    if data == "MENU_GROUP_HOME":
-        lang = _get_group_lang(chat.id, user.id)
-        await q.edit_message_text(_group_menu_text(lang), reply_markup=build_group_main_kb(lang), parse_mode="Markdown")
-        return
-
-    if data == "LANG_GROUP":
-        lang = _get_group_lang(chat.id, user.id)
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🇬🇧 English", callback_data="GLANG_SET_en")],
-            [InlineKeyboardButton("🇷🇺 Русский", callback_data="GLANG_SET_ru")],
-            [InlineKeyboardButton("« Return", callback_data="MENU_GROUP_HOME")],
-        ])
-        await q.edit_message_text("Choose language / Выберите язык", reply_markup=kb)
-        return
-
-    if data.startswith("GLANG_SET_"):
-        lang_code = data.split("_", 2)[2] if "_" in data else "en"
-        set_group_lang(chat.id, lang_code)
-        lang = _get_group_lang(chat.id, user.id)
-        try:
-            await q.answer("Язык сохранён ✅" if lang == "ru" else "Language saved ✅", show_alert=False)
-        except Exception:
-            pass
-        await q.edit_message_text(_group_menu_text(lang), reply_markup=build_group_main_kb(lang), parse_mode="Markdown")
-        return
-
     if data == "LANG_PRIVATE":
         lang = _get_user_lang(user.id)
         kb = InlineKeyboardMarkup([
@@ -2426,22 +2298,36 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    if data == "ADD_GROUP":
+    if data == "MENU_LANG_GROUP":
+        lang = _get_group_lang(chat.id, user.id)
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🇺🇸 English ✅" if lang == "en" else "🇺🇸 English", callback_data="GLANG_SET_en")],
+            [InlineKeyboardButton("🇷🇺 Russian ✅" if lang == "ru" else "🇷🇺 Russian", callback_data="GLANG_SET_ru")],
+            [InlineKeyboardButton("« Return", callback_data="MENU_HOME_GROUP")],
+        ])
+        await q.edit_message_text("Choose group language:" if lang == "en" else "Выберите язык группы:", reply_markup=kb)
+        return
+
+    if data.startswith("GLANG_SET_"):
+        lang_code = data.split("_", 2)[2] if "_" in data else "en"
+        set_group_lang(chat.id, lang_code)
+        new_lang = _get_group_lang(chat.id, user.id)
+        await q.edit_message_text(build_group_home_text(new_lang), reply_markup=build_group_home_kb(new_lang), parse_mode="Markdown")
+        return
+
+    if data == "MENU_HOME_GROUP":
+        lang = _get_group_lang(chat.id, user.id)
+        await q.edit_message_text(build_group_home_text(lang), reply_markup=build_group_home_kb(lang), parse_mode="Markdown")
+        return
+
+    if data == "MENU_ADD_GROUP":
         data = "CFG_GROUP"
 
-    if data == "EDIT_GROUP":
-        if not await is_admin(context.bot, chat.id, user.id):
-            await q.answer("Admins only.", show_alert=True)
-            return
-        await send_edit_token_menu(chat.id, context, q.message, edit=True)
-        return
+    if data == "MENU_EDIT_GROUP":
+        data = "TOKENSET_GROUP"
 
-    if data == "VIEWTOKENS_GROUP":
-        if not await is_admin(context.bot, chat.id, user.id):
-            await q.answer("Admins only.", show_alert=True)
-            return
-        await send_view_tokens_menu(chat.id, context, q.message, edit=True)
-        return
+    if data == "MENU_VIEW_GROUP":
+        data = "STATUS_GROUP"
 
     if data == "CFG_GROUP":
         # Crypton-style: group button opens DM config (deep-link) so you don't have to reply in group.
@@ -2475,126 +2361,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Optional: add the token Telegram link after the CA.\n"
             "Example: EQ... https://t.me/YourTokenTG"
         )
-        return
-
-    if data == "EDITPAGE_1":
-        await q.answer()
-        return
-
-    if data == "EDITSET_BUYSTEP":
-        if not await is_admin(context.bot, chat.id, user.id):
-            await q.answer("Admins only.", show_alert=True)
-            return
-        await q.edit_message_text(
-            "Buy Step\n\nChoose the buy step value.",
-            reply_markup=_build_value_pick_kb("EDITVAL_BUYSTEP_", ["0.5", "1", "2", "5", "10"]),
-        )
-        return
-
-    if data.startswith("EDITVAL_BUYSTEP_"):
-        if not await is_admin(context.bot, chat.id, user.id):
-            await q.answer("Admins only.", show_alert=True)
-            return
-        val = float(data.split("EDITVAL_BUYSTEP_", 1)[1])
-        g = get_group(chat.id)
-        g["settings"]["strength_step_ton"] = val
-        save_groups()
-        await send_edit_token_menu(chat.id, context, q.message, edit=True)
-        return
-
-    if data == "EDITSET_MINBUY":
-        if not await is_admin(context.bot, chat.id, user.id):
-            await q.answer("Admins only.", show_alert=True)
-            return
-        await q.edit_message_text(
-            "Min Buy\n\nChoose the minimum buy amount.",
-            reply_markup=_build_value_pick_kb("EDITVAL_MINBUY_", ["0", "0.1", "0.25", "0.5", "1", "2", "5"]),
-        )
-        return
-
-    if data.startswith("EDITVAL_MINBUY_"):
-        if not await is_admin(context.bot, chat.id, user.id):
-            await q.answer("Admins only.", show_alert=True)
-            return
-        val = float(data.split("EDITVAL_MINBUY_", 1)[1])
-        g = get_group(chat.id)
-        g["settings"]["min_buy_ton"] = val
-        save_groups()
-        await send_edit_token_menu(chat.id, context, q.message, edit=True)
-        return
-
-    if data == "EDITSET_LINK":
-        if not await is_admin(context.bot, chat.id, user.id):
-            await q.answer("Admins only.", show_alert=True)
-            return
-        AWAITING_SOCIAL[user.id] = {"chat_id": chat.id, "field": "telegram"}
-        await q.edit_message_text(
-            "Link\n\nSend your Telegram token link now.\nExample: https://t.me/YourToken\n\nWhen done, open Edit again.",
-            disable_web_page_preview=True,
-        )
-        return
-
-    if data == "EDITSET_EMOJI":
-        if not await is_admin(context.bot, chat.id, user.id):
-            await q.answer("Admins only.", show_alert=True)
-            return
-        kb = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("🟢", callback_data="EDITVAL_EMOJI_green"),
-                InlineKeyboardButton("💎", callback_data="EDITVAL_EMOJI_diamond"),
-                InlineKeyboardButton("🚀", callback_data="EDITVAL_EMOJI_rocket"),
-            ],
-            [InlineKeyboardButton("Custom", callback_data="EDITVAL_EMOJI_custom")],
-            [InlineKeyboardButton("« Return", callback_data="EDIT_GROUP")],
-        ])
-        await q.edit_message_text("Emoji\n\nChoose the buy emoji.", reply_markup=kb)
-        return
-
-    if data.startswith("EDITVAL_EMOJI_"):
-        if not await is_admin(context.bot, chat.id, user.id):
-            await q.answer("Admins only.", show_alert=True)
-            return
-        pick = data.split("EDITVAL_EMOJI_", 1)[1]
-        if pick == "custom":
-            AWAITING_CUSTOM_EMOJI[user.id] = chat.id
-            await q.edit_message_text("Send your custom emoji now.\n\nWhen done, open Edit again.")
-            return
-        emoji = {"green": "🟢", "diamond": "💎", "rocket": "🚀"}.get(pick, "🟢")
-        g = get_group(chat.id)
-        g["settings"]["strength_emoji"] = emoji
-        save_groups()
-        await send_edit_token_menu(chat.id, context, q.message, edit=True)
-        return
-
-    if data == "EDITSET_MEDIA":
-        if not await is_admin(context.bot, chat.id, user.id):
-            await q.answer("Admins only.", show_alert=True)
-            return
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Upload Media", callback_data="EDITVAL_MEDIA_UPLOAD")],
-            [InlineKeyboardButton("Clear Media", callback_data="EDITVAL_MEDIA_CLEAR")],
-            [InlineKeyboardButton("« Return", callback_data="EDIT_GROUP")],
-        ])
-        await q.edit_message_text("Media\n\nUpload or clear the token media.", reply_markup=kb)
-        return
-
-    if data == "EDITVAL_MEDIA_UPLOAD":
-        if not await is_admin(context.bot, chat.id, user.id):
-            await q.answer("Admins only.", show_alert=True)
-            return
-        AWAITING_IMAGE[user.id] = chat.id
-        await q.edit_message_text("Send a photo, GIF, or short video now.\n\nWhen done, open Edit again.")
-        return
-
-    if data == "EDITVAL_MEDIA_CLEAR":
-        if not await is_admin(context.bot, chat.id, user.id):
-            await q.answer("Admins only.", show_alert=True)
-            return
-        g = get_group(chat.id)
-        g["settings"]["buy_image_file_id"] = ""
-        g["settings"]["buy_image_on"] = False
-        save_groups()
-        await send_edit_token_menu(chat.id, context, q.message, edit=True)
         return
 
     if data == "TOKENSET_GROUP":
@@ -4953,17 +4719,11 @@ async def on_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if chat.type not in ("group","supergroup"):
             return
         if new and new.status in ("member","administrator"):
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("⚙️ Configure Token", callback_data="CFG_GROUP")],
-                [InlineKeyboardButton("⚙️ Token Settings", callback_data="TOKENSET_GROUP")],
-                [InlineKeyboardButton("🛠 Settings", callback_data="SET_GROUP")],
-                [InlineKeyboardButton("📊 Status", callback_data="STATUS_GROUP")],
-                [InlineKeyboardButton("🗑 Remove Token", callback_data="REMOVE_GROUP")],
-            ])
+            lang = _get_group_lang(chat.id)
             await context.bot.send_message(
                 chat_id=chat.id,
-                text="✅ *SpyTON BuyBot connected*\nTap *Configure Token* to start posting buys.",
-                reply_markup=kb,
+                text=build_group_home_text(lang),
+                reply_markup=build_group_home_kb(lang),
                 parse_mode="Markdown"
             )
     except Exception:
