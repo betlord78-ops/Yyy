@@ -1933,7 +1933,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if chat.type == "private":
-        # Deep-link from group "Click Here!" button: /start cfg_<group_id>
+        # Deep-link support kept for compatibility; normal group setup now happens directly in-group.
         if context.args:
             arg = str(context.args[0])
             if arg.startswith("cfg_"):
@@ -2351,7 +2351,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await is_admin(context.bot, chat.id, user.id):
             await q.answer("Admins only.", show_alert=True)
             return
-        await send_settings(chat.id, context, q.message, edit=True)
+        await q.edit_message_text(
+            "⚙️ Group settings are managed from Edit for this flow.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:home")]])
+        )
         return
 
     if data.startswith("editpage:"):
@@ -2409,7 +2412,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(
             "To configure a group:\n"
             "1) Add the bot to your group.\n"
-            "2) In that group, tap *Configure Token*.",
+            "2) In that group, tap *Add Token* or *Edit*.",
             parse_mode="Markdown"
         )
         return
@@ -2458,7 +2461,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await is_admin(context.bot, chat.id, user.id):
             await q.answer("Admins only.", show_alert=True)
             return
-        await send_settings(chat.id, context, q.message, edit=True)
+        await send_customize_token_page(chat.id, context, q.message, edit=True)
         return
 
     if data.startswith("TOG_"):
@@ -2489,7 +2492,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data == "TOG_IMAGE":
             s["buy_image_on"] = not bool(s.get("buy_image_on", False))
         save_groups()
-        await send_settings(chat.id, context, q.message, edit=True)
+        await send_customize_token_page(chat.id, context, q.message, edit=True)
         return
 
     if data == "IMG_SET":
@@ -2498,7 +2501,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         # Next photo from this admin will be saved as the buy image for this group.
         AWAITING_IMAGE[user.id] = chat.id
-        await q.message.reply_text("Send the *buy image* now as a Telegram photo (not a file).", parse_mode="Markdown")
+        await q.message.reply_text("Send the token image now as a Telegram photo.")
         return
 
     if data == "IMG_CLEAR":
@@ -2509,7 +2512,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         g["settings"]["buy_image_file_id"] = ""
         g["settings"]["buy_image_on"] = False
         save_groups()
-        await send_settings(chat.id, context, q.message, edit=True)
+        await send_customize_token_page(chat.id, context, q.message, edit=True)
         return
 
     if data.startswith("MIN_"):
@@ -2521,7 +2524,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         val = float(data.split("_",1)[1])
         s["min_buy_ton"] = val
         save_groups()
-        await send_settings(chat.id, context, q.message, edit=True)
+        await send_customize_token_page(chat.id, context, q.message, edit=True)
         return
 
     if data.startswith("STEP_"):
@@ -2533,7 +2536,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         step = float(data.split("_", 1)[1])
         s["strength_step_ton"] = step
         save_groups()
-        await send_settings(chat.id, context, q.message, edit=True)
+        await send_customize_token_page(chat.id, context, q.message, edit=True)
         return
 
     if data.startswith("MAX_"):
@@ -2545,7 +2548,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mx = int(data.split("_", 1)[1])
         s["strength_max"] = mx
         save_groups()
-        await send_settings(chat.id, context, q.message, edit=True)
+        await send_customize_token_page(chat.id, context, q.message, edit=True)
         return
 
     if data.startswith("EMO_"):
@@ -2561,7 +2564,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data == "EMO_DIAMOND":
             s["strength_emoji"] = "💎"
         save_groups()
-        await send_settings(chat.id, context, q.message, edit=True)
+        await send_customize_token_page(chat.id, context, q.message, edit=True)
         return
 
     if data.startswith("SPAM_"):
@@ -2572,7 +2575,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         s = g["settings"]
         s["anti_spam"] = data.split("_",1)[1]
         save_groups()
-        await send_settings(chat.id, context, q.message, edit=True)
+        await send_customize_token_page(chat.id, context, q.message, edit=True)
         return
 
     if data == "STATUS_GROUP":
@@ -2951,7 +2954,7 @@ async def send_status(chat_id: int, context: ContextTypes.DEFAULT_TYPE, msg):
     g = get_group(chat_id)
     token = g.get("token")
     if not token:
-        await msg.reply_text("No token configured. Tap *Configure Token*.", parse_mode="Markdown")
+        await msg.reply_text("No token configured yet. Tap *Add Token* first.", parse_mode="Markdown")
         return
     await msg.reply_text(
         "📊 *Status*\n"
@@ -3079,7 +3082,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         g = get_group(chat.id)
         tok = g.get("token") if isinstance(g, dict) else None
         if not isinstance(tok, dict) or not (tok.get("address") or "").strip():
-            await update.message.reply_text("No token configured yet. Tap /start → Configure Token.")
+            await update.message.reply_text("No token configured yet. Tap Add Token first.")
             return
         name = str(tok.get("name") or tok.get("symbol") or "Token").strip()
         sym = str(tok.get("symbol") or "").strip()
@@ -3244,7 +3247,14 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_groups()
     AWAITING_IMAGE.pop(user.id, None)
 
-    await update.message.reply_text("✅ Buy image saved. Image mode is now ON.")
+    await update.message.reply_text("✅ Token updated.")
+    try:
+        if chat.id == target_chat_id:
+            await send_customize_token_page(target_chat_id, context, update.message, edit=False)
+        else:
+            await context.bot.send_message(chat_id=target_chat_id, text="✅ Token image updated.")
+    except Exception:
+        pass
 
 async def configure_group_token(chat_id: int, jetton: str, context: ContextTypes.DEFAULT_TYPE, reply_to_chat: int, telegram: str = "", dex_mode: str = "both"):
     g = get_group(chat_id)
