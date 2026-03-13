@@ -591,6 +591,7 @@ DEFAULT_SETTINGS = {
     # If enabled and a file_id is set, the bot will send a Telegram photo (not a link).
     "buy_image_on": False,
     "buy_image_file_id": "",
+    "buy_media_type": "photo",
 
     # Min buy can be TON or USD
     "min_buy_unit": "TON",   # TON | USD
@@ -738,9 +739,6 @@ AWAITING_IMAGE: Dict[int, int] = {}
 
 # user_id -> awaiting custom strength emoji text (can be normal emoji or <tg-emoji ...>)
 AWAITING_CUSTOM_EMOJI: Dict[int, int] = {}  # user_id -> chat_id
-# user_id -> edit flow state in group/private
-AWAITING_EDIT: Dict[int, Dict[str, Any]] = {}  # {group_id:int, field:str}
-
 
 # -------------------- HELPERS --------------------
 JETTON_RE = re.compile(r"\b([EU]Q[A-Za-z0-9_-]{40,80})\b")
@@ -1858,82 +1856,13 @@ async def build_add_to_group_url(app: Application) -> str:
         pass
     return "https://t.me/"  # fallback
 
-def build_group_main_menu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🇺🇸 Language", callback_data="menu:lang"),
-         InlineKeyboardButton("✏️ Edit", callback_data="menu:edit")],
-        [InlineKeyboardButton("➕ Add Token", callback_data="menu:add"),
-         InlineKeyboardButton("👀 View Tokens", callback_data="menu:view")],
-        [InlineKeyboardButton("⚙️ Group Settings", callback_data="menu:group")],
-    ])
-
-
-def build_customize_token_kb(g: Dict[str, Any]) -> InlineKeyboardMarkup:
-    tok = g.get("token") or {}
-    s = g.get("settings") or DEFAULT_SETTINGS
-    buy_step = float(s.get("strength_step_ton") or 1.0)
-    min_buy = float(s.get("min_buy_ton") or 0.0)
-    emoji = str(s.get("strength_emoji") or "🟢")
-    tg_set = bool(str(tok.get("telegram") or "").strip())
-    media_set = bool(str(s.get("buy_image_file_id") or "").strip())
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Tab 1", callback_data="editpage:1")],
-        [InlineKeyboardButton("ℹ️ Buy Step", callback_data="editset:buy_step"),
-         InlineKeyboardButton(f"✏️ ({buy_step:g})", callback_data="editset:buy_step")],
-        [InlineKeyboardButton("ℹ️ Min Buy", callback_data="editset:min_buy"),
-         InlineKeyboardButton(f"✏️ ({min_buy:g})", callback_data="editset:min_buy")],
-        [InlineKeyboardButton("ℹ️ Link", callback_data="editset:link"),
-         InlineKeyboardButton(f"✏️ ({'set' if tg_set else ''})", callback_data="editset:link")],
-        [InlineKeyboardButton("ℹ️ Emoji", callback_data="editset:emoji"),
-         InlineKeyboardButton(f"✏️ ({emoji})", callback_data="editset:emoji")],
-        [InlineKeyboardButton("ℹ️ Media", callback_data="editset:media"),
-         InlineKeyboardButton(f"✏️ ({'📸' if media_set else ''})", callback_data="editset:media")],
-        [InlineKeyboardButton("⬅️ Back", callback_data="menu:home")],
-    ])
-
-
-async def send_group_main_menu(chat_id: int, context: ContextTypes.DEFAULT_TYPE, msg=None, edit: bool=False):
-    text = "SpyTON main menu"
-    kb = build_group_main_menu()
-    if edit and msg is not None:
-        try:
-            await msg.edit_text(text, reply_markup=kb)
-            return
-        except Exception:
-            pass
-    target = msg.reply_text if msg is not None else context.bot.send_message
-    if msg is not None:
-        await msg.reply_text(text, reply_markup=kb)
-    else:
-        await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
-
-
-async def send_customize_token_page(chat_id: int, context: ContextTypes.DEFAULT_TYPE, msg, edit: bool=False):
-    g = get_group(chat_id)
-    tok = g.get("token") or {}
-    if not isinstance(tok, dict) or not tok.get("address"):
-        text = "No token configured yet. Tap Add Token first."
-        if edit:
-            await msg.edit_text(text)
-        else:
-            await msg.reply_text(text)
-        return
-    label = str(tok.get("name") or tok.get("symbol") or "Token").strip()
-    text = f"Customize your Token\n\n<code>{html.escape(str(tok.get('address') or ''))}</code>\n\nName: <b>{html.escape(label)}</b>"
-    kb = build_customize_token_kb(g)
-    if edit:
-        await msg.edit_text(text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
-    else:
-        await msg.reply_text(text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
-
-
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if not chat:
         return
 
     if chat.type == "private":
-        # Deep-link support kept for compatibility; normal group setup now happens directly in-group.
+        # Deep-link from group "Click Here!" button: /start cfg_<group_id>
         if context.args:
             arg = str(context.args[0])
             if arg.startswith("cfg_"):
@@ -1965,7 +1894,20 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
     else:
-        await update.message.reply_text("SpyTON main menu", reply_markup=build_group_main_menu())
+        # In group, show group menu
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⚙️ Configure Token", callback_data="CFG_GROUP")],
+            [InlineKeyboardButton("⚙️ Token Settings", callback_data="TOKENSET_GROUP")],
+            [InlineKeyboardButton("🛠 Settings", callback_data="SET_GROUP")],
+            [InlineKeyboardButton("📊 Status", callback_data="STATUS_GROUP")],
+            [InlineKeyboardButton("🗑 Remove Token", callback_data="REMOVE_GROUP")],
+        ])
+        await update.message.reply_text(
+            "✅ *SpyTON BuyBot connected*\n\n"
+            "Tap *Configure Token* to set the token, or type `ca` anytime to show the token address.",
+            reply_markup=kb,
+            parse_mode="Markdown"
+        )
 
 
 async def lang_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2303,82 +2245,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     data = q.data or ""
-
-    if data == "menu:home":
-        await send_group_main_menu(chat.id, context, q.message, edit=True)
-        return
-
-    if data == "menu:lang":
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🇺🇸 English", callback_data="LANG_SET_en")],
-            [InlineKeyboardButton("🇷🇺 Russian", callback_data="LANG_SET_ru")],
-            [InlineKeyboardButton("⬅️ Back", callback_data="menu:home")],
-        ])
-        await q.edit_message_text("Choose language", reply_markup=kb)
-        return
-
-    if data == "menu:add":
-        if not await is_admin(context.bot, chat.id, user.id):
-            await q.answer("Admins only.", show_alert=True)
-            return
-        AWAITING[user.id] = {"group_id": chat.id, "stage": "ADD_TOKEN", "dex": "both"}
-        await q.message.reply_text("⬇️ Paste the TON token contract address")
-        return
-
-    if data == "menu:edit":
-        if not await is_admin(context.bot, chat.id, user.id):
-            await q.answer("Admins only.", show_alert=True)
-            return
-        await send_customize_token_page(chat.id, context, q.message, edit=True)
-        return
-
-    if data == "menu:view":
-        g = get_group(chat.id)
-        tok = g.get("token") or {}
-        if not isinstance(tok, dict) or not tok.get("address"):
-            await q.edit_message_text("No token added yet.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:home")]]))
-            return
-        label = html.escape(str(tok.get("symbol") or tok.get("name") or "Token"))
-        dex = []
-        if tok.get("ston_pool"): dex.append("stonfi")
-        if tok.get("dedust_pool"): dex.append("dedust")
-        txt = f"✅ Token Added\n• Token: {label}\n• Dex: {', '.join(dex) if dex else 'auto'}\n\nNow posting buys automatically for this group.\nUse Edit to customize token settings"
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("✏️ Edit", callback_data="menu:edit")],[InlineKeyboardButton("⬅️ Back", callback_data="menu:home")]])
-        await q.edit_message_text(txt, reply_markup=kb)
-        return
-
-    if data == "menu:group":
-        if not await is_admin(context.bot, chat.id, user.id):
-            await q.answer("Admins only.", show_alert=True)
-            return
-        await q.edit_message_text(
-            "⚙️ Group settings are managed from Edit for this flow.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:home")]])
-        )
-        return
-
-    if data.startswith("editpage:"):
-        await send_customize_token_page(chat.id, context, q.message, edit=True)
-        return
-
-    if data.startswith("editset:"):
-        if not await is_admin(context.bot, chat.id, user.id):
-            await q.answer("Admins only.", show_alert=True)
-            return
-        field = data.split(":",1)[1]
-        if field == "media":
-            AWAITING_IMAGE[user.id] = chat.id
-            await q.message.reply_text("Send the token image now as a Telegram photo.")
-            return
-        prompts = {
-            "buy_step": "Send buy step in TON.",
-            "min_buy": "Send minimum buy in TON.",
-            "link": "Send Telegram link or type skip.",
-            "emoji": "Send one emoji.",
-        }
-        AWAITING_EDIT[user.id] = {"group_id": chat.id, "field": field}
-        await q.message.reply_text(prompts.get(field, "Send value now."))
-        return
     if data == "LANG_PRIVATE":
         lang = _get_user_lang(user.id)
         kb = InlineKeyboardMarkup([
@@ -2412,17 +2278,25 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(
             "To configure a group:\n"
             "1) Add the bot to your group.\n"
-            "2) In that group, tap *Add Token* or *Edit*.",
+            "2) In that group, tap *Configure Token*.",
             parse_mode="Markdown"
         )
         return
 
     if data == "CFG_GROUP":
+        # Crypton-style: group button opens DM config (deep-link) so you don't have to reply in group.
         if not await is_admin(context.bot, chat.id, user.id):
             await q.answer("Admins only.", show_alert=True)
             return
-        AWAITING[user.id] = {"group_id": chat.id, "stage": "ADD_TOKEN", "dex": "both"}
-        await q.message.reply_text("⬇️ Paste the TON token contract address")
+        bot_username = await get_bot_username(context.bot)
+        deep = f"https://t.me/{bot_username}?start=cfg_{chat.id}"
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("Click Here!", url=deep)]])
+        await q.message.reply_text(
+            "To continue, click *Click Here!* and send your token CA in DM.",
+            parse_mode="Markdown",
+            reply_markup=kb,
+        )
+        await q.answer()
         return
 
 
@@ -2447,7 +2321,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await is_admin(context.bot, chat.id, user.id):
             await q.answer("Admins only.", show_alert=True)
             return
-        await send_customize_token_page(chat.id, context, q.message, edit=True)
+        await send_token_settings(chat.id, context, q.message)
         return
 
     if data.startswith("TS_"):
@@ -2458,10 +2332,12 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "SET_GROUP":
+        # Settings should open the Crypton-style module menu (Token Settings),
+        # not the legacy quick-toggles panel.
         if not await is_admin(context.bot, chat.id, user.id):
             await q.answer("Admins only.", show_alert=True)
             return
-        await send_customize_token_page(chat.id, context, q.message, edit=True)
+        await send_token_settings(chat.id, context, q.message)
         return
 
     if data.startswith("TOG_"):
@@ -2492,7 +2368,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data == "TOG_IMAGE":
             s["buy_image_on"] = not bool(s.get("buy_image_on", False))
         save_groups()
-        await send_customize_token_page(chat.id, context, q.message, edit=True)
+        await send_settings(chat.id, context, q.message, edit=True)
         return
 
     if data == "IMG_SET":
@@ -2501,7 +2377,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         # Next photo from this admin will be saved as the buy image for this group.
         AWAITING_IMAGE[user.id] = chat.id
-        await q.message.reply_text("Send the token image now as a Telegram photo.")
+        await q.message.reply_text("Send the buy media now as a Telegram *photo, video, GIF, or file*.", parse_mode="Markdown")
         return
 
     if data == "IMG_CLEAR":
@@ -2510,9 +2386,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         g = get_group(chat.id)
         g["settings"]["buy_image_file_id"] = ""
+        g["settings"]["buy_media_type"] = "photo"
         g["settings"]["buy_image_on"] = False
         save_groups()
-        await send_customize_token_page(chat.id, context, q.message, edit=True)
+        await send_settings(chat.id, context, q.message, edit=True)
         return
 
     if data.startswith("MIN_"):
@@ -2524,7 +2401,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         val = float(data.split("_",1)[1])
         s["min_buy_ton"] = val
         save_groups()
-        await send_customize_token_page(chat.id, context, q.message, edit=True)
+        await send_settings(chat.id, context, q.message, edit=True)
         return
 
     if data.startswith("STEP_"):
@@ -2536,7 +2413,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         step = float(data.split("_", 1)[1])
         s["strength_step_ton"] = step
         save_groups()
-        await send_customize_token_page(chat.id, context, q.message, edit=True)
+        await send_settings(chat.id, context, q.message, edit=True)
         return
 
     if data.startswith("MAX_"):
@@ -2548,7 +2425,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mx = int(data.split("_", 1)[1])
         s["strength_max"] = mx
         save_groups()
-        await send_customize_token_page(chat.id, context, q.message, edit=True)
+        await send_settings(chat.id, context, q.message, edit=True)
         return
 
     if data.startswith("EMO_"):
@@ -2564,7 +2441,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data == "EMO_DIAMOND":
             s["strength_emoji"] = "💎"
         save_groups()
-        await send_customize_token_page(chat.id, context, q.message, edit=True)
+        await send_settings(chat.id, context, q.message, edit=True)
         return
 
     if data.startswith("SPAM_"):
@@ -2575,7 +2452,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         s = g["settings"]
         s["anti_spam"] = data.split("_",1)[1]
         save_groups()
-        await send_customize_token_page(chat.id, context, q.message, edit=True)
+        await send_settings(chat.id, context, q.message, edit=True)
         return
 
     if data == "STATUS_GROUP":
@@ -2646,7 +2523,7 @@ async def send_settings(chat_id: int, context: ContextTypes.DEFAULT_TYPE, msg, e
         [InlineKeyboardButton(f"Burst: {burst}", callback_data="TOG_BURST")],
         [InlineKeyboardButton(f"Strength: {strength}", callback_data="TOG_STRENGTH"),
          InlineKeyboardButton(f"Image: {img}", callback_data="TOG_IMAGE")],
-        [InlineKeyboardButton("🖼 Set Buy Image", callback_data="IMG_SET"),
+        [InlineKeyboardButton("🎞 Set Buy Media", callback_data="IMG_SET"),
          InlineKeyboardButton("🗑 Clear Image", callback_data="IMG_CLEAR")],
         [InlineKeyboardButton("Min 0", callback_data="MIN_0"),
          InlineKeyboardButton("0.1", callback_data="MIN_0.1"),
@@ -2839,12 +2716,12 @@ async def handle_token_settings_button(chat_id: int, data: str, update: Update, 
         img_set = bool((s.get("buy_image_file_id") or "").strip())
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton(f"Image: {'ON ✅' if img_on else 'OFF ❌'}", callback_data="TS_MEDIA_TOG")],
-            [InlineKeyboardButton("🖼 Set Buy Image", callback_data="IMG_SET"),
+            [InlineKeyboardButton("🎞 Set Buy Media", callback_data="IMG_SET"),
              InlineKeyboardButton("🗑 Clear Image", callback_data="IMG_CLEAR")],
             [InlineKeyboardButton("⬅️ Back", callback_data="TS_BACK")],
         ])
         await msg.edit_text(
-            f"*Manage Media*\n• Image mode: *{'ON' if img_on else 'OFF'}*\n• Image: *{'set' if img_set else 'not set'}*",
+            f"*Manage Media*\n• Media mode: *{'ON' if img_on else 'OFF'}*\n• Media: *{'set' if img_set else 'not set'}*",
             parse_mode="Markdown",
             reply_markup=kb,
             disable_web_page_preview=True
@@ -2954,7 +2831,7 @@ async def send_status(chat_id: int, context: ContextTypes.DEFAULT_TYPE, msg):
     g = get_group(chat_id)
     token = g.get("token")
     if not token:
-        await msg.reply_text("No token configured yet. Tap *Add Token* first.", parse_mode="Markdown")
+        await msg.reply_text("No token configured. Tap *Configure Token*.", parse_mode="Markdown")
         return
     await msg.reply_text(
         "📊 *Status*\n"
@@ -3082,7 +2959,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         g = get_group(chat.id)
         tok = g.get("token") if isinstance(g, dict) else None
         if not isinstance(tok, dict) or not (tok.get("address") or "").strip():
-            await update.message.reply_text("No token configured yet. Tap Add Token first.")
+            await update.message.reply_text("No token configured yet. Tap /start → Configure Token.")
             return
         name = str(tok.get("name") or tok.get("symbol") or "Token").strip()
         sym = str(tok.get("symbol") or "").strip()
@@ -3090,39 +2967,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         header = f"{name} — (${sym})" if sym else f"{name}"
         await update.message.reply_text(f"{header}\n\n{ca}")
         return
-
-    # New inline edit flow like the second file
-    if user.id in AWAITING_EDIT:
-        cfg = AWAITING_EDIT.get(user.id) or {}
-        target_chat_id = int(cfg.get("group_id") or 0)
-        field = str(cfg.get("field") or "").strip()
-        if target_chat_id and await is_admin(context.bot, target_chat_id, user.id):
-            g = get_group(target_chat_id)
-            tok = g.get("token") or {}
-            s = g.get("settings") or DEFAULT_SETTINGS
-            try:
-                if field == "buy_step":
-                    s["strength_step_ton"] = float(text)
-                elif field == "min_buy":
-                    s["min_buy_unit"] = "TON"
-                    s["min_buy_ton"] = float(text)
-                elif field == "link":
-                    if isinstance(tok, dict):
-                        tok["telegram"] = "" if text.lower() == "skip" else text.strip()
-                elif field == "emoji":
-                    s["strength_emoji"] = text.strip()[:16]
-                else:
-                    raise ValueError("unknown field")
-                save_groups()
-                AWAITING_EDIT.pop(user.id, None)
-                await update.message.reply_text("✅ Token updated.")
-                if chat.id == target_chat_id:
-                    await send_customize_token_page(target_chat_id, context, update.message, edit=False)
-                else:
-                    await context.bot.send_message(chat_id=target_chat_id, text="✅ Token updated.")
-            except Exception:
-                await update.message.reply_text("Invalid value. Try again.")
-            return
 
     # Awaiting custom buy-strength emoji (can be normal emoji or Telegram premium <tg-emoji ...>)
     if user.id in AWAITING_CUSTOM_EMOJI:
@@ -3190,32 +3034,35 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat.type == "private":
         cfg = AWAITING.get(user.id)
         if not cfg:
-            await update.message.reply_text("Add the bot to your group, then tap Add Token there.")
+            await update.message.reply_text("Add the bot to your group, then tap *Configure Token* in that group.", parse_mode="Markdown")
             return
         if isinstance(cfg, dict):
+            if cfg.get("stage") != "CA":
+                await update.message.reply_text("Tap *Configure Token* again and choose a DEX first.", parse_mode="Markdown")
+                return
             target_chat_id = int(cfg.get("group_id") or 0)
             dex_mode = str(cfg.get("dex") or "").strip() or "both"
         else:
             target_chat_id = int(cfg)
             dex_mode = "both"
         if not target_chat_id:
-            await update.message.reply_text("Tap Add Token again in your group.")
+            await update.message.reply_text("Tap *Configure Token* again in your group.", parse_mode="Markdown")
             return
     else:
+        # in group: only admins can configure
         if not await is_admin(context.bot, chat.id, user.id):
             return
-        cfg = AWAITING.get(user.id)
-        if isinstance(cfg, dict) and int(cfg.get("group_id") or 0) == chat.id and str(cfg.get("stage") or "") in ("ADD_TOKEN","CA"):
-            target_chat_id = chat.id
-            dex_mode = str(cfg.get("dex") or "both")
-        else:
-            return
+        # If user pressed configure, it's this chat anyway
+        target_chat_id = chat.id
+        dex_mode = "both"
     await configure_group_token(target_chat_id, addr, context, reply_to_chat=chat.id, telegram=tg_url, dex_mode=dex_mode)
-    AWAITING.pop(user.id, None)
+    # Clear awaiting state after successful input
+    if chat.type == "private":
+        AWAITING.pop(user.id, None)
 
 
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Capture a buy image from an admin and store its Telegram file_id."""
+async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Capture buy media from an admin and store its Telegram file_id and media type."""
     if not update.message or not update.effective_user or not update.effective_chat:
         return
     user = update.effective_user
@@ -3227,34 +3074,52 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not target_chat_id:
         return
 
-    # In groups, ensure they are sending the photo inside the same group they are configuring.
     if chat.type in ("group", "supergroup") and chat.id != target_chat_id:
         return
 
-    # In private, we trust the stored target_chat_id.
     if not await is_admin(context.bot, target_chat_id, user.id):
         AWAITING_IMAGE.pop(user.id, None)
         return
 
+    media_type = None
+    file_id = None
+
     photos = update.message.photo or []
-    if not photos:
+    if photos:
+        media_type = "photo"
+        file_id = photos[-1].file_id
+    elif update.message.animation:
+        media_type = "animation"
+        file_id = update.message.animation.file_id
+    elif update.message.video:
+        media_type = "video"
+        file_id = update.message.video.file_id
+    elif update.message.document:
+        doc = update.message.document
+        mime = (doc.mime_type or "").lower()
+        name = (doc.file_name or "").lower()
+        file_id = doc.file_id
+        if mime == "image/gif" or name.endswith(".gif"):
+            media_type = "animation"
+        elif mime.startswith("video/") or name.endswith((".mp4", ".mov", ".m4v", ".webm")):
+            media_type = "video"
+        elif mime.startswith("image/") or name.endswith((".jpg", ".jpeg", ".png", ".webp")):
+            media_type = "photo"
+        else:
+            media_type = "document"
+
+    if not file_id:
         return
 
-    file_id = photos[-1].file_id  # largest
     g = get_group(target_chat_id)
     g["settings"]["buy_image_file_id"] = file_id
+    g["settings"]["buy_media_type"] = media_type or "photo"
     g["settings"]["buy_image_on"] = True
     save_groups()
     AWAITING_IMAGE.pop(user.id, None)
 
-    await update.message.reply_text("✅ Token updated.")
-    try:
-        if chat.id == target_chat_id:
-            await send_customize_token_page(target_chat_id, context, update.message, edit=False)
-        else:
-            await context.bot.send_message(chat_id=target_chat_id, text="✅ Token image updated.")
-    except Exception:
-        pass
+    label = {"photo": "photo", "animation": "GIF", "video": "video", "document": "file"}.get(media_type or "photo", "media")
+    await update.message.reply_text(f"✅ Buy media saved ({label}). Media mode is now ON.")
 
 async def configure_group_token(chat_id: int, jetton: str, context: ContextTypes.DEFAULT_TYPE, reply_to_chat: int, telegram: str = "", dex_mode: str = "both"):
     g = get_group(chat_id)
@@ -3454,17 +3319,14 @@ async def _set_token_now(chat_id: int, jetton: str, context: ContextTypes.DEFAUL
         pass
 
     disp = sym or name or "TOKEN"
-    dex_labels = []
-    if ston_pool:
-        dex_labels.append("stonfi")
-    if dedust_pool:
-        dex_labels.append("dedust")
     msg = (
         f"✅ *Token Added*\n"
         f"• Token: *{html.escape(disp)}*\n"
-        f"• Dex: *{', '.join(dex_labels) if dex_labels else 'auto'}*\n\n"
+        f"• Address: `{jetton}`\n"
+        f"• STON.fi pool: `{ston_pool or 'NONE'}`\n"
+        f"• DeDust pool: `{dedust_pool or 'NONE'}`\n\n"
         f"Now posting buys automatically for this group.\n"
-        f"Use *Edit* to customize token settings"
+        f"Use *Settings* to set buy strength & image."
     )
 
     await context.bot.send_message(
@@ -4386,15 +4248,50 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
     async def _send(dest_chat_id: int):
         kb = build_buy_keyboard(int(dest_chat_id))
         local_msg = build_trending_channel_message() if is_trending_dest(int(dest_chat_id)) else build_group_message()
-        # Never send group buy image into the trending channel.
+        # Never send group buy media into the trending channel.
         if use_image and (not is_trending_dest(int(dest_chat_id))):
-            await app.bot.send_photo(
-                chat_id=dest_chat_id,
-                photo=buy_file_id,
-                caption=local_msg,
-                parse_mode="HTML",
-                reply_markup=kb,
-            )
+            media_type = str(s.get("buy_media_type") or "photo").lower()
+            try:
+                if media_type == "animation":
+                    await app.bot.send_animation(
+                        chat_id=dest_chat_id,
+                        animation=buy_file_id,
+                        caption=local_msg,
+                        parse_mode="HTML",
+                        reply_markup=kb,
+                    )
+                elif media_type == "video":
+                    await app.bot.send_video(
+                        chat_id=dest_chat_id,
+                        video=buy_file_id,
+                        caption=local_msg,
+                        parse_mode="HTML",
+                        reply_markup=kb,
+                    )
+                elif media_type == "document":
+                    await app.bot.send_document(
+                        chat_id=dest_chat_id,
+                        document=buy_file_id,
+                        caption=local_msg,
+                        parse_mode="HTML",
+                        reply_markup=kb,
+                    )
+                else:
+                    await app.bot.send_photo(
+                        chat_id=dest_chat_id,
+                        photo=buy_file_id,
+                        caption=local_msg,
+                        parse_mode="HTML",
+                        reply_markup=kb,
+                    )
+            except Exception:
+                await app.bot.send_message(
+                    chat_id=dest_chat_id,
+                    text=local_msg,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                    reply_markup=kb,
+                )
         else:
             await app.bot.send_message(
                 chat_id=dest_chat_id,
@@ -4714,10 +4611,18 @@ async def on_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if chat.type not in ("group","supergroup"):
             return
         if new and new.status in ("member","administrator"):
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("⚙️ Configure Token", callback_data="CFG_GROUP")],
+                [InlineKeyboardButton("⚙️ Token Settings", callback_data="TOKENSET_GROUP")],
+                [InlineKeyboardButton("🛠 Settings", callback_data="SET_GROUP")],
+                [InlineKeyboardButton("📊 Status", callback_data="STATUS_GROUP")],
+                [InlineKeyboardButton("🗑 Remove Token", callback_data="REMOVE_GROUP")],
+            ])
             await context.bot.send_message(
                 chat_id=chat.id,
-                text="SpyTON main menu",
-                reply_markup=build_group_main_menu()
+                text="✅ *SpyTON BuyBot connected*\nTap *Configure Token* to start posting buys.",
+                reply_markup=kb,
+                parse_mode="Markdown"
             )
     except Exception:
         return
@@ -4761,7 +4666,7 @@ def main():
     application.add_handler(CommandHandler("adstatus", adstatus_cmd))
     application.add_handler(CallbackQueryHandler(on_replace_button, pattern=r"^(REPL_|CANCEL_REPL$)"))
     application.add_handler(CallbackQueryHandler(on_button))
-    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    application.add_handler(MessageHandler(filters.PHOTO | filters.ANIMATION | filters.VIDEO | filters.Document.ALL, handle_media))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     application.add_handler(ChatMemberHandler(on_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
 
