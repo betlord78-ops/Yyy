@@ -24,7 +24,7 @@ log = logging.getLogger("spyton_public")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 TONAPI_KEY = os.getenv("TONAPI_KEY", "").strip()
 TONAPI_BASE = os.getenv("TONAPI_BASE", "https://tonapi.io").strip().rstrip("/")
-POLL_INTERVAL = max(2.0, float(os.getenv("POLL_INTERVAL", "2.0")))
+POLL_INTERVAL = max(0.75, float(os.getenv("POLL_INTERVAL", "0.75")))
 BURST_WINDOW_SEC = int(os.getenv("BURST_WINDOW_SEC", "30"))
 DTRADE_REF = os.getenv("DTRADE_REF", "https://t.me/dtrade?start=11TYq7LInG").strip()
 TRENDING_URL = os.getenv("TRENDING_URL", "https://t.me/SpyTonTrending").strip()
@@ -587,8 +587,8 @@ DEFAULT_SETTINGS = {
     "strength_step_ton": 5.0,   # 1 strength unit per X TON
     "strength_max": 30,         # max emojis
 
-    # Optional buy alert image
-    # If enabled and a file_id is set, the bot will send a Telegram photo (not a link).
+    # Optional buy alert media
+    # Supports Telegram photo, GIF/animation, or short video using the stored file_id.
     "buy_image_on": False,
     "buy_image_file_id": "",
     "buy_media_type": "photo",
@@ -734,7 +734,7 @@ AWAITING: Dict[int, Dict[str, Any]] = {}  # user_id -> {'group_id': int, 'stage'
 # user_id -> chat_id awaiting social link input
 AWAITING_SOCIAL: Dict[int, Dict[str, Any]] = {}  # {'chat_id': int, 'field': 'telegram'|'website'|'twitter'}
 
-# user_id -> chat_id awaiting buy image photo
+# user_id -> chat_id awaiting buy media (photo / gif / short video)
 AWAITING_IMAGE: Dict[int, int] = {}
 
 # user_id -> awaiting custom strength emoji text (can be normal emoji or <tg-emoji ...>)
@@ -2375,9 +2375,13 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await is_admin(context.bot, chat.id, user.id):
             await q.answer("Admins only.", show_alert=True)
             return
-        # Next photo from this admin will be saved as the buy image for this group.
+        # Next media from this admin will be saved as the buy media for this group.
         AWAITING_IMAGE[user.id] = chat.id
-        await q.message.reply_text("Send the buy media now as a Telegram *photo, video, GIF, or file*.", parse_mode="Markdown")
+        await q.message.reply_text(
+            "Send the *buy media* now as a Telegram photo, GIF, or short video.\n"
+            "Please send it as normal Telegram media, not as a file.",
+            parse_mode="Markdown",
+        )
         return
 
     if data == "IMG_CLEAR":
@@ -2386,7 +2390,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         g = get_group(chat.id)
         g["settings"]["buy_image_file_id"] = ""
-        g["settings"]["buy_media_type"] = "photo"
         g["settings"]["buy_image_on"] = False
         save_groups()
         await send_settings(chat.id, context, q.message, edit=True)
@@ -2523,7 +2526,7 @@ async def send_settings(chat_id: int, context: ContextTypes.DEFAULT_TYPE, msg, e
         [InlineKeyboardButton(f"Burst: {burst}", callback_data="TOG_BURST")],
         [InlineKeyboardButton(f"Strength: {strength}", callback_data="TOG_STRENGTH"),
          InlineKeyboardButton(f"Image: {img}", callback_data="TOG_IMAGE")],
-        [InlineKeyboardButton("🎞 Set Buy Media", callback_data="IMG_SET"),
+        [InlineKeyboardButton("🖼 Set Buy Image", callback_data="IMG_SET"),
          InlineKeyboardButton("🗑 Clear Image", callback_data="IMG_CLEAR")],
         [InlineKeyboardButton("Min 0", callback_data="MIN_0"),
          InlineKeyboardButton("0.1", callback_data="MIN_0.1"),
@@ -2716,12 +2719,12 @@ async def handle_token_settings_button(chat_id: int, data: str, update: Update, 
         img_set = bool((s.get("buy_image_file_id") or "").strip())
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton(f"Image: {'ON ✅' if img_on else 'OFF ❌'}", callback_data="TS_MEDIA_TOG")],
-            [InlineKeyboardButton("🎞 Set Buy Media", callback_data="IMG_SET"),
+            [InlineKeyboardButton("🖼 Set Buy Image", callback_data="IMG_SET"),
              InlineKeyboardButton("🗑 Clear Image", callback_data="IMG_CLEAR")],
             [InlineKeyboardButton("⬅️ Back", callback_data="TS_BACK")],
         ])
         await msg.edit_text(
-            f"*Manage Media*\n• Media mode: *{'ON' if img_on else 'OFF'}*\n• Media: *{'set' if img_set else 'not set'}*",
+            f"*Manage Media*\n• Image mode: *{'ON' if img_on else 'OFF'}*\n• Image: *{'set' if img_set else 'not set'}*",
             parse_mode="Markdown",
             reply_markup=kb,
             disable_web_page_preview=True
@@ -2947,6 +2950,22 @@ def resolve_jetton_from_text_sync(text: str) -> Optional[str]:
     # if neither side says TON, still return base (best-effort)
     return base_addr or quote_addr or None
 
+async def _infer_target_group_from_state(user_id: int) -> Optional[int]:
+    cfg = AWAITING.get(user_id)
+    if isinstance(cfg, dict):
+        try:
+            gid = int(cfg.get("group_id") or 0)
+            return gid or None
+        except Exception:
+            return None
+    if cfg:
+        try:
+            gid = int(cfg)
+            return gid or None
+        except Exception:
+            return None
+    return None
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.effective_chat or not update.effective_user:
         return
@@ -3034,9 +3053,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat.type == "private":
         cfg = AWAITING.get(user.id)
         if not cfg:
-            await update.message.reply_text("Add the bot to your group, then tap *Configure Token* in that group.", parse_mode="Markdown")
-            return
-        if isinstance(cfg, dict):
+            target_chat_id = await _infer_target_group_from_state(user.id)
+            if not target_chat_id:
+                await update.message.reply_text("Add the bot to your group, then tap *Configure Token* in that group.", parse_mode="Markdown")
+                return
+            dex_mode = "both"
+        elif isinstance(cfg, dict):
             if cfg.get("stage") != "CA":
                 await update.message.reply_text("Tap *Configure Token* again and choose a DEX first.", parse_mode="Markdown")
                 return
@@ -3055,14 +3077,28 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # If user pressed configure, it's this chat anyway
         target_chat_id = chat.id
         dex_mode = "both"
-    await configure_group_token(target_chat_id, addr, context, reply_to_chat=chat.id, telegram=tg_url, dex_mode=dex_mode)
+    processing_msg = None
+    try:
+        if chat.type == "private":
+            processing_msg = await update.message.reply_text("⏳ Token received. Processing pools now...")
+        await configure_group_token(target_chat_id, addr, context, reply_to_chat=chat.id, telegram=tg_url, dex_mode=dex_mode)
+    except Exception as e:
+        log.exception("handle_text configure failed for chat=%s user=%s", target_chat_id, user.id)
+        await update.message.reply_text("❌ Failed to add token. Please try again.\nReason: %s" % (type(e).__name__,))
+        return
+    finally:
+        if processing_msg:
+            try:
+                await processing_msg.delete()
+            except Exception:
+                pass
     # Clear awaiting state after successful input
     if chat.type == "private":
         AWAITING.pop(user.id, None)
 
 
-async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Capture buy media from an admin and store its Telegram file_id and media type."""
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Capture buy media from an admin and store its Telegram file_id and type."""
     if not update.message or not update.effective_user or not update.effective_chat:
         return
     user = update.effective_user
@@ -3074,52 +3110,39 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not target_chat_id:
         return
 
+    # In groups, ensure they are sending the photo inside the same group they are configuring.
     if chat.type in ("group", "supergroup") and chat.id != target_chat_id:
         return
 
+    # In private, we trust the stored target_chat_id.
     if not await is_admin(context.bot, target_chat_id, user.id):
         AWAITING_IMAGE.pop(user.id, None)
         return
 
     media_type = None
-    file_id = None
+    file_id = ""
 
     photos = update.message.photo or []
     if photos:
         media_type = "photo"
-        file_id = photos[-1].file_id
-    elif update.message.animation:
+        file_id = photos[-1].file_id  # largest photo
+    elif getattr(update.message, "animation", None):
         media_type = "animation"
         file_id = update.message.animation.file_id
-    elif update.message.video:
+    elif getattr(update.message, "video", None):
         media_type = "video"
         file_id = update.message.video.file_id
-    elif update.message.document:
-        doc = update.message.document
-        mime = (doc.mime_type or "").lower()
-        name = (doc.file_name or "").lower()
-        file_id = doc.file_id
-        if mime == "image/gif" or name.endswith(".gif"):
-            media_type = "animation"
-        elif mime.startswith("video/") or name.endswith((".mp4", ".mov", ".m4v", ".webm")):
-            media_type = "video"
-        elif mime.startswith("image/") or name.endswith((".jpg", ".jpeg", ".png", ".webp")):
-            media_type = "photo"
-        else:
-            media_type = "document"
-
-    if not file_id:
+    else:
         return
 
     g = get_group(target_chat_id)
     g["settings"]["buy_image_file_id"] = file_id
-    g["settings"]["buy_media_type"] = media_type or "photo"
+    g["settings"]["buy_media_type"] = media_type
     g["settings"]["buy_image_on"] = True
     save_groups()
     AWAITING_IMAGE.pop(user.id, None)
 
-    label = {"photo": "photo", "animation": "GIF", "video": "video", "document": "file"}.get(media_type or "photo", "media")
-    await update.message.reply_text(f"✅ Buy media saved ({label}). Media mode is now ON.")
+    await update.message.reply_text(f"✅ Buy media saved ({media_type}). Image mode is now ON.")
 
 async def configure_group_token(chat_id: int, jetton: str, context: ContextTypes.DEFAULT_TYPE, reply_to_chat: int, telegram: str = "", dex_mode: str = "both"):
     g = get_group(chat_id)
@@ -3184,17 +3207,32 @@ async def on_replace_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _set_token_now(chat_id: int, jetton: str, context: ContextTypes.DEFAULT_TYPE, reply_chat_id: int, telegram: str = "", dex_mode: str = "both"):
     # Token metadata (GeckoTerminal first, then TonAPI, then DexScreener)
-    gk = gecko_token_info(jetton)
-    name = (gk.get("name") or "").strip() if gk else ""
-    sym = (gk.get("symbol") or "").strip() if gk else ""
+    name = ""
+    sym = ""
+    try:
+        gk = gecko_token_info(jetton)
+        name = (gk.get("name") or "").strip() if gk else ""
+        sym = (gk.get("symbol") or "").strip() if gk else ""
+    except Exception:
+        pass
     if not name and not sym:
-        info = tonapi_jetton_info(jetton)
-        name = (info.get("name") or "").strip()
-        sym = (info.get("symbol") or "").strip()
+        try:
+            info = tonapi_jetton_info(jetton)
+            name = (info.get("name") or "").strip()
+            sym = (info.get("symbol") or "").strip()
+        except Exception:
+            pass
     if not name and not sym:
-        dx = dex_token_info(jetton)
-        name = (dx.get("name") or "").strip()
-        sym = (dx.get("symbol") or "").strip()
+        try:
+            dx = dex_token_info(jetton)
+            name = (dx.get("name") or "").strip()
+            sym = (dx.get("symbol") or "").strip()
+        except Exception:
+            pass
+    if not name:
+        name = "Token"
+    if not sym:
+        sym = (name[:10] or "TOKEN").upper()
     dex_mode = (dex_mode or "both").lower().strip()
     # Seed holders once at setup so first buys show holders immediately.
     holders_seed: Optional[int] = None
@@ -3319,9 +3357,10 @@ async def _set_token_now(chat_id: int, jetton: str, context: ContextTypes.DEFAUL
         pass
 
     disp = sym or name or "TOKEN"
+    safe_disp = re.sub(r"([_\*\[\]\(\)~`>#+\-=|{}.!])", r"\\\1", str(disp))
     msg = (
         f"✅ *Token Added*\n"
-        f"• Token: *{html.escape(disp)}*\n"
+        f"• Token: *{safe_disp}*\n"
         f"• Address: `{jetton}`\n"
         f"• STON.fi pool: `{ston_pool or 'NONE'}`\n"
         f"• DeDust pool: `{dedust_pool or 'NONE'}`\n\n"
@@ -4229,8 +4268,9 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
     # Default message used for the original chat send
     msg = build_trending_channel_message() if is_trending_dest(int(chat_id)) else build_group_message()
 
-    # If buy image enabled and a Telegram file_id is set, send a photo with caption.
+    # If buy media is enabled and a Telegram file_id is set, send the configured media with caption.
     buy_file_id = (s.get("buy_image_file_id") or "").strip()
+    buy_media_type = str(s.get("buy_media_type") or "photo").strip().lower()
     use_image = bool(s.get("buy_image_on", False)) and bool(buy_file_id)
 
     # Buttons:
@@ -4248,48 +4288,46 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
     async def _send(dest_chat_id: int):
         kb = build_buy_keyboard(int(dest_chat_id))
         local_msg = build_trending_channel_message() if is_trending_dest(int(dest_chat_id)) else build_group_message()
-        # Never send group buy media into the trending channel.
-        if use_image and (not is_trending_dest(int(dest_chat_id))):
-            media_type = str(s.get("buy_media_type") or "photo").lower()
+
+        # --- Premium emoji bar for trending channel (entities-based, reliable) ---
+        if int(dest_chat_id) == int(TRENDING_CHANNEL_ID_FORCED):
             try:
-                if media_type == "animation":
-                    await app.bot.send_animation(
+                # reuse same strength count as message builder uses
+                strength_count = int(emoji_strength_count(buy_ton, settings))
+                bar_text, bar_entities = build_premium_bar_entities(strength_count, FORCED_CHANNEL_CUSTOM_EMOJI_ID)
+                if bar_text:
+                    await app.bot.send_message(
                         chat_id=dest_chat_id,
-                        animation=buy_file_id,
-                        caption=local_msg,
-                        parse_mode="HTML",
-                        reply_markup=kb,
-                    )
-                elif media_type == "video":
-                    await app.bot.send_video(
-                        chat_id=dest_chat_id,
-                        video=buy_file_id,
-                        caption=local_msg,
-                        parse_mode="HTML",
-                        reply_markup=kb,
-                    )
-                elif media_type == "document":
-                    await app.bot.send_document(
-                        chat_id=dest_chat_id,
-                        document=buy_file_id,
-                        caption=local_msg,
-                        parse_mode="HTML",
-                        reply_markup=kb,
-                    )
-                else:
-                    await app.bot.send_photo(
-                        chat_id=dest_chat_id,
-                        photo=buy_file_id,
-                        caption=local_msg,
-                        parse_mode="HTML",
-                        reply_markup=kb,
+                        text=bar_text,
+                        entities=bar_entities,
                     )
             except Exception:
-                await app.bot.send_message(
+                pass
+        # Never send group buy media into the trending channel.
+        if use_image and (not is_trending_dest(int(dest_chat_id))):
+            if buy_media_type == "animation":
+                await app.bot.send_animation(
                     chat_id=dest_chat_id,
-                    text=local_msg,
+                    animation=buy_file_id,
+                    caption=local_msg,
                     parse_mode="HTML",
-                    disable_web_page_preview=True,
+                    reply_markup=kb,
+                )
+            elif buy_media_type == "video":
+                await app.bot.send_video(
+                    chat_id=dest_chat_id,
+                    video=buy_file_id,
+                    caption=local_msg,
+                    parse_mode="HTML",
+                    reply_markup=kb,
+                    supports_streaming=True,
+                )
+            else:
+                await app.bot.send_photo(
+                    chat_id=dest_chat_id,
+                    photo=buy_file_id,
+                    caption=local_msg,
+                    parse_mode="HTML",
                     reply_markup=kb,
                 )
         else:
@@ -4319,12 +4357,36 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
 
 async def tracker_loop(app: Application):
     while True:
+        cycle_started = time.monotonic()
         try:
             await poll_once(app)
         except Exception as e:
             log.exception("tracker loop error: %s", e)
-        await asyncio.sleep(POLL_INTERVAL)
+        elapsed = time.monotonic() - cycle_started
+        await asyncio.sleep(max(0.10, POLL_INTERVAL - elapsed))
 
+
+
+TRENDING_CHANNEL_ID_FORCED = -1002379265999
+FORCED_CHANNEL_CUSTOM_EMOJI_ID = "5188481279963715781"
+
+def build_premium_bar_entities(count: int, emoji_id: str):
+    """
+    Build a text + entities list to render Telegram custom (premium) emojis reliably.
+    This uses MessageEntity(type="custom_emoji", ...) for each char.
+    """
+    try:
+        from telegram import MessageEntity
+    except Exception:
+        MessageEntity = None
+    count = max(0, int(count))
+    # use a simple placeholder char per emoji
+    text = "▫" * count if count > 0 else ""
+    entities = []
+    if MessageEntity and count > 0:
+        for i in range(count):
+            entities.append(MessageEntity(type="custom_emoji", offset=i, length=1, custom_emoji_id=str(emoji_id)))
+    return text, entities
 
 # -------------------- Trending Leaderboard (Top-10) --------------------
 def build_leaderboard_text() -> str:
@@ -4666,7 +4728,7 @@ def main():
     application.add_handler(CommandHandler("adstatus", adstatus_cmd))
     application.add_handler(CallbackQueryHandler(on_replace_button, pattern=r"^(REPL_|CANCEL_REPL$)"))
     application.add_handler(CallbackQueryHandler(on_button))
-    application.add_handler(MessageHandler(filters.PHOTO | filters.ANIMATION | filters.VIDEO | filters.Document.ALL, handle_media))
+    application.add_handler(MessageHandler(filters.PHOTO | filters.ANIMATION | filters.VIDEO, handle_photo))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     application.add_handler(ChatMemberHandler(on_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
 
