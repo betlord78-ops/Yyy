@@ -2378,7 +2378,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("Preview expired. Add the token again.", show_alert=True)
             return
         AWAITING.pop(user.id, None)
-        await _set_token_now(chat.id, str(payload.get("address") or ""), context, chat.id, telegram=str(payload.get("telegram") or ""), dex_mode="both")
+        await _set_token_now(chat.id, str(payload.get("address") or ""), context, chat.id, telegram=str(payload.get("telegram") or ""), dex_mode="both", announce=False)
         await send_customize_panel(chat.id, context, q.message)
         return
     if data == "LANG_PRIVATE":
@@ -3174,7 +3174,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     tok["telegram"] = m.group(0).strip()
                     save_groups()
                 AWAITING_EDIT_INPUT.pop(user.id, None)
-                await update.message.reply_text("✅ Link updated.")
+                try:
+                    await update.message.delete()
+                except Exception:
+                    pass
                 await send_customize_panel(target_chat_id, context, update.message)
                 return
             if field == "emoji":
@@ -3205,7 +3208,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 tok["telegram"] = tg_url
                 save_groups()
             AWAITING_SOCIAL.pop(user.id, None)
-            await update.message.reply_text("✅ Token Telegram link saved.")
+            try:
+                await update.message.delete()
+            except Exception:
+                pass
             return
         AWAITING_SOCIAL.pop(user.id, None)
         return
@@ -3341,7 +3347,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Buy media saved ({media_type}). Image mode is now ON.")
     await send_customize_panel(target_chat_id, context, update.message)
 
-async def configure_group_token(chat_id: int, jetton: str, context: ContextTypes.DEFAULT_TYPE, reply_to_chat: int, telegram: str = "", dex_mode: str = "both"):
+async def configure_group_token(chat_id: int, jetton: str, context: ContextTypes.DEFAULT_TYPE, reply_to_chat: int, telegram: str = "", dex_mode: str = "both", announce: bool = True):
     g = get_group(chat_id)
     # 1 token per group: confirm replace if exists and different
     existing = g.get("token") or None
@@ -3364,7 +3370,7 @@ async def configure_group_token(chat_id: int, jetton: str, context: ContextTypes
             parse_mode="Markdown"
         )
         return
-    await _set_token_now(chat_id, jetton, context, reply_to_chat, telegram=telegram, dex_mode=dex_mode)
+    await _set_token_now(chat_id, jetton, context, reply_to_chat, telegram=telegram, dex_mode=dex_mode, announce=announce)
 
 async def on_replace_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -3402,7 +3408,7 @@ async def on_replace_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text("Cancelled.")
         return
 
-async def _set_token_now(chat_id: int, jetton: str, context: ContextTypes.DEFAULT_TYPE, reply_chat_id: int, telegram: str = "", dex_mode: str = "both"):
+async def _set_token_now(chat_id: int, jetton: str, context: ContextTypes.DEFAULT_TYPE, reply_chat_id: int, telegram: str = "", dex_mode: str = "both", announce: bool = True):
     # Token metadata (GeckoTerminal first, then TonAPI, then DexScreener)
     name = ""
     sym = ""
@@ -3565,19 +3571,20 @@ async def _set_token_now(chat_id: int, jetton: str, context: ContextTypes.DEFAUL
         f"Use *Edit* to customize buy step, min buy, link, emoji, and media."
     )
 
-    await context.bot.send_message(
-        chat_id=reply_chat_id,
-        text=msg,
-        parse_mode="Markdown",
-        disable_web_page_preview=True,
-    )
-    if reply_chat_id != chat_id:
+    if announce:
         await context.bot.send_message(
-            chat_id=chat_id,
+            chat_id=reply_chat_id,
             text=msg,
             parse_mode="Markdown",
             disable_web_page_preview=True,
         )
+        if reply_chat_id != chat_id:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=msg,
+                parse_mode="Markdown",
+                disable_web_page_preview=True,
+            )
 
 # -------------------- TRACKERS --------------------
 async def _to_thread(fn, *args, **kwargs):
