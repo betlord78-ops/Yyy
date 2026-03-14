@@ -2358,13 +2358,13 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "EDIT_MIN":
-        prompt = await _send_customize_prompt(chat.id, context, "👇 Enter the minimum buy amount in USD (e.g., 10)")
+        prompt = await _send_customize_prompt(chat.id, context, "👇 Enter the minimum buy amount in TON (e.g., 10)")
         AWAITING_EDIT_INPUT[user.id] = {"chat_id": chat.id, "field": "min_buy", "prompt_msg_id": prompt.message_id}
         return
 
     if data == "EDIT_LINK":
-        prompt = await _send_customize_prompt(chat.id, context, "👇 Send your group/portal link now.")
-        AWAITING_EDIT_INPUT[user.id] = {"chat_id": chat.id, "field": "telegram", "prompt_msg_id": prompt.message_id}
+        AWAITING_EDIT_INPUT[user.id] = {"chat_id": chat.id, "field": "telegram"}
+        await q.message.reply_text("👇 Send your group/portal link (e.g., https://t.me/SpyTonCommunity)")
         return
 
     if data == "EDIT_EMOJI":
@@ -3174,8 +3174,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await send_customize_panel(target_chat_id, context, update.message)
                 return
             if field == "min_buy":
-                s["min_buy_unit"] = "USD"
-                s["min_buy_usd"] = float(text)
+                s["min_buy_unit"] = "TON"
+                s["min_buy_ton"] = float(text)
+                s["min_buy_usd"] = 0.0
                 save_groups()
                 AWAITING_EDIT_INPUT.pop(user.id, None)
                 try:
@@ -3573,7 +3574,7 @@ async def _set_token_now(chat_id: int, jetton: str, context: ContextTypes.DEFAUL
             s["enable_dedust"] = True
         else:
             s["enable_dedust"] = bool(dedust_pool)
-            s["enable_ston"] = False if dedust_pool else bool(ston_pool)
+            s["enable_ston"] = bool(ston_pool)
         g["settings"] = s
     except Exception:
         pass
