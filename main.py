@@ -3345,11 +3345,17 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user.id not in AWAITING_IMAGE:
         return
 
-    target_chat_id = AWAITING_IMAGE.get(user.id)
+    cfg = AWAITING_IMAGE.get(user.id)
+    prompt_msg_id = None
+    if isinstance(cfg, dict):
+        target_chat_id = int(cfg.get("chat_id") or 0)
+        prompt_msg_id = cfg.get("prompt_msg_id")
+    else:
+        target_chat_id = int(cfg or 0)
     if not target_chat_id:
         return
 
-    # In groups, ensure they are sending the photo inside the same group they are configuring.
+    # In groups, ensure they are sending the media inside the same group they are configuring.
     if chat.type in ("group", "supergroup") and chat.id != target_chat_id:
         return
 
@@ -3381,7 +3387,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_groups()
     AWAITING_IMAGE.pop(user.id, None)
 
-    await update.message.reply_text(f"✅ Buy media saved ({media_type}). Image mode is now ON.")
+    try:
+        if prompt_msg_id:
+            await context.bot.delete_message(chat_id=target_chat_id, message_id=int(prompt_msg_id))
+    except Exception:
+        pass
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
     await send_customize_panel(target_chat_id, context, update.message)
 
 async def configure_group_token(chat_id: int, jetton: str, context: ContextTypes.DEFAULT_TYPE, reply_to_chat: int, telegram: str = "", dex_mode: str = "both", announce: bool = True):
