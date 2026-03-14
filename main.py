@@ -1934,34 +1934,15 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if chat.type == "private":
-        # Deep-link from group "Click Here!" button: /start cfg_<group_id>
-        if context.args:
-            arg = str(context.args[0])
-            if arg.startswith("cfg_"):
-                try:
-                    group_id = int(arg.split("_", 1)[1])
-                except Exception:
-                    group_id = None
-                if group_id:
-                    # Auto-detect mode: user sends CA, we resolve STON.fi + DeDust pools automatically.
-                    AWAITING[update.effective_user.id] = {"group_id": group_id, "stage": "CA", "dex": "both"}
-                    lang = _get_user_lang(update.effective_user.id if update.effective_user else None)
-                    await update.message.reply_text(
-                        t("connected_title", lang) + "\n\n" + t("connected_desc", lang),
-                        parse_mode="Markdown"
-                    )
-                    return
         add_url = await build_add_to_group_url(context.application)
-        lang = _get_user_lang(update.effective_user.id if update.effective_user else None)
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(t("btn_add_group", lang), url=add_url)],
-            [InlineKeyboardButton(t("btn_cfg_token", lang), callback_data="CFG_PRIVATE")],
-            [InlineKeyboardButton(t("btn_settings", lang), callback_data="SET_PRIVATE")],
-            [InlineKeyboardButton(t("btn_language", lang), callback_data="LANG_PRIVATE")],
-            [InlineKeyboardButton(t("btn_support", lang), url="https://t.me/SpyTonEco")],
+            [InlineKeyboardButton("➕ Add BuyBot to Group", url=add_url)],
         ])
         await update.message.reply_text(
-            t("start_title", lang) + "\n" + t("start_desc", lang),
+            "*SpyTON BuyBot*\n\n"
+            "This bot is configured *directly inside your group*.\n"
+            "There is no private DM setup anymore.\n\n"
+            "Add the bot to your group and use */start* there.",
             reply_markup=kb,
             parse_mode="Markdown"
         )
@@ -2411,40 +2392,27 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
         add_url = await build_add_to_group_url(context.application)
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(t("btn_add_group", new_lang), url=add_url)],
-            [InlineKeyboardButton(t("btn_cfg_token", new_lang), callback_data="CFG_PRIVATE")],
-            [InlineKeyboardButton(t("btn_settings", new_lang), callback_data="SET_PRIVATE")],
-            [InlineKeyboardButton(t("btn_language", new_lang), callback_data="LANG_PRIVATE")],
-            [InlineKeyboardButton(t("btn_support", new_lang), url="https://t.me/SpyTonEco")],
-        ])
-        await q.edit_message_text(t("start_title", new_lang) + "\n" + t("start_desc", new_lang), reply_markup=kb, parse_mode="Markdown")
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("➕ Add BuyBot to Group", url=add_url)]])
+        await q.edit_message_text(
+            "*SpyTON BuyBot*\n\nThis bot is configured *directly inside your group*.\nThere is no private DM setup anymore.\n\nAdd the bot to your group and use */start* there.",
+            reply_markup=kb,
+            parse_mode="Markdown"
+        )
         return
 
     if data in ("CFG_PRIVATE","SET_PRIVATE"):
-        # In private we configure a target group via last used group in AWAITING or ask user to do it in group
         await q.edit_message_text(
-            "To configure a group:\n"
-            "1) Add the bot to your group.\n"
-            "2) In that group, tap *Configure Token*.",
+            "Setup now works *only inside the group*.\n\nAdd the bot to your group and use */start* there.",
             parse_mode="Markdown"
         )
         return
 
     if data == "CFG_GROUP":
-        # Crypton-style: group button opens DM config (deep-link) so you don't have to reply in group.
         if not await is_admin(context.bot, chat.id, user.id):
             await q.answer("Admins only.", show_alert=True)
             return
-        bot_username = await get_bot_username(context.bot)
-        deep = f"https://t.me/{bot_username}?start=cfg_{chat.id}"
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("Click Here!", url=deep)]])
-        await q.message.reply_text(
-            "To continue, click *Click Here!* and send your token CA in DM.",
-            parse_mode="Markdown",
-            reply_markup=kb,
-        )
-        await q.answer()
+        AWAITING[user.id] = {"group_id": chat.id, "stage": "GROUP_ADD", "dex": "both"}
+        await q.message.reply_text("👇 Paste the token contract address")
         return
 
 
@@ -2469,7 +2437,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await is_admin(context.bot, chat.id, user.id):
             await q.answer("Admins only.", show_alert=True)
             return
-        await send_token_settings(chat.id, context, q.message)
+        await send_customize_panel(chat.id, context, q.message)
         return
 
     if data.startswith("TS_"):
@@ -2485,7 +2453,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await is_admin(context.bot, chat.id, user.id):
             await q.answer("Admins only.", show_alert=True)
             return
-        await send_token_settings(chat.id, context, q.message)
+        await send_customize_panel(chat.id, context, q.message)
         return
 
     if data.startswith("TOG_"):
@@ -2982,7 +2950,7 @@ async def send_status(chat_id: int, context: ContextTypes.DEFAULT_TYPE, msg):
     g = get_group(chat_id)
     token = g.get("token")
     if not token:
-        await msg.reply_text("No token configured. Tap *Configure Token*.", parse_mode="Markdown")
+        await msg.reply_text("No token configured yet. Tap *Add token*.", parse_mode="Markdown")
         return
     await msg.reply_text(
         "📊 *Status*\n"
@@ -3126,7 +3094,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         g = get_group(chat.id)
         tok = g.get("token") if isinstance(g, dict) else None
         if not isinstance(tok, dict) or not (tok.get("address") or "").strip():
-            await update.message.reply_text("No token configured yet. Tap /start → Configure Token.")
+            await update.message.reply_text("No token configured yet. Tap /start → Add token.")
             return
         name = str(tok.get("name") or tok.get("symbol") or "Token").strip()
         sym = str(tok.get("symbol") or "").strip()
@@ -3254,12 +3222,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not cfg:
             target_chat_id = await _infer_target_group_from_state(user.id)
             if not target_chat_id:
-                await update.message.reply_text("Add the bot to your group, then tap *Configure Token* in that group.", parse_mode="Markdown")
+                await update.message.reply_text("Add the bot to your group and use */start* there.", parse_mode="Markdown")
                 return
             dex_mode = "both"
         elif isinstance(cfg, dict):
             if cfg.get("stage") != "CA":
-                await update.message.reply_text("Tap *Configure Token* again and choose a DEX first.", parse_mode="Markdown")
+                await update.message.reply_text("Tap *Add token* again in your group.", parse_mode="Markdown")
                 return
             target_chat_id = int(cfg.get("group_id") or 0)
             dex_mode = str(cfg.get("dex") or "").strip() or "both"
@@ -3267,7 +3235,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             target_chat_id = int(cfg)
             dex_mode = "both"
         if not target_chat_id:
-            await update.message.reply_text("Tap *Configure Token* again in your group.", parse_mode="Markdown")
+            await update.message.reply_text("Tap *Add token* again in your group.", parse_mode="Markdown")
             return
     else:
         # in group: only admins can configure
@@ -4894,18 +4862,12 @@ async def on_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if chat.type not in ("group","supergroup"):
             return
         if new and new.status in ("member","administrator"):
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("⚙️ Configure Token", callback_data="CFG_GROUP")],
-                [InlineKeyboardButton("⚙️ Token Settings", callback_data="TOKENSET_GROUP")],
-                [InlineKeyboardButton("🛠 Settings", callback_data="SET_GROUP")],
-                [InlineKeyboardButton("📊 Status", callback_data="STATUS_GROUP")],
-                [InlineKeyboardButton("🗑 Remove Token", callback_data="REMOVE_GROUP")],
-            ])
             await context.bot.send_message(
                 chat_id=chat.id,
-                text="✅ *SpyTON BuyBot connected*\nTap *Configure Token* to start posting buys.",
-                reply_markup=kb,
-                parse_mode="Markdown"
+                text=_spyton_home_text(),
+                reply_markup=_group_home_keyboard(),
+                parse_mode="Markdown",
+                disable_web_page_preview=True,
             )
     except Exception:
         return
