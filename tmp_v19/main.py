@@ -737,6 +737,12 @@ AWAITING_SOCIAL: Dict[int, Dict[str, Any]] = {}  # {'chat_id': int, 'field': 'te
 # user_id -> chat_id awaiting buy media (photo / gif / short video)
 AWAITING_IMAGE: Dict[int, int] = {}
 
+# user_id -> {'chat_id': int, 'field': 'step'|'min_buy'|'telegram'|'emoji'}
+AWAITING_EDIT_INPUT: Dict[int, Dict[str, Any]] = {}
+
+# preview cache for add-token confirm flow; key is f"{chat_id}:{user_id}"
+PENDING_TOKEN_PREVIEW: Dict[str, Dict[str, Any]] = {}
+
 # user_id -> awaiting custom strength emoji text (can be normal emoji or <tg-emoji ...>)
 AWAITING_CUSTOM_EMOJI: Dict[int, int] = {}  # user_id -> chat_id
 
@@ -2371,6 +2377,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not payload:
             await q.answer("Preview expired. Add the token again.", show_alert=True)
             return
+        AWAITING.pop(user.id, None)
         await _set_token_now(chat.id, str(payload.get("address") or ""), context, chat.id, telegram=str(payload.get("telegram") or ""), dex_mode="both")
         await send_customize_panel(chat.id, context, q.message)
         return
@@ -3241,28 +3248,29 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # in group: only admins can configure
         if not await is_admin(context.bot, chat.id, user.id):
             return
+        cfg = AWAITING.get(user.id) or {}
+        if not (isinstance(cfg, dict) and cfg.get("stage") == "GROUP_ADD" and int(cfg.get("group_id") or 0) == chat.id):
+            return
         target_chat_id = chat.id
         dex_mode = "both"
-        cfg = AWAITING.get(user.id) or {}
-        if isinstance(cfg, dict) and cfg.get("stage") == "GROUP_ADD" and int(cfg.get("group_id") or 0) == chat.id:
-            name = "Token"
-            sym = "TOKEN"
-            holders = 0
-            try:
-                info = tonapi_jetton_info(addr)
-                name = (info.get("name") or name).strip()
-                sym = (info.get("symbol") or sym).strip()
-                holders = int(info.get("holders_count") or 0)
-            except Exception:
-                pass
-            PENDING_TOKEN_PREVIEW[_preview_key(chat.id, user.id)] = {"address": addr, "telegram": tg_url, "name": name, "symbol": sym, "holders": holders}
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("CLICK TO CONFIRM", callback_data="CONFIRM_PREVIEW")]])
-            await update.message.reply_text(
-                f"*Token Details*\nName: *{name}*\nSymbol: *{sym}*\nHolders: *{holders}*\n\nIs this correct?",
-                parse_mode="Markdown",
-                reply_markup=kb,
-            )
-            return
+        name = "Token"
+        sym = "TOKEN"
+        holders = 0
+        try:
+            info = tonapi_jetton_info(addr)
+            name = (info.get("name") or name).strip()
+            sym = (info.get("symbol") or sym).strip()
+            holders = int(info.get("holders_count") or 0)
+        except Exception:
+            pass
+        PENDING_TOKEN_PREVIEW[_preview_key(chat.id, user.id)] = {"address": addr, "telegram": tg_url, "name": name, "symbol": sym, "holders": holders}
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("CLICK TO CONFIRM", callback_data="CONFIRM_PREVIEW")]])
+        await update.message.reply_text(
+            f"*Token Details*\nName: *{name}*\nSymbol: *{sym}*\nHolders: *{holders}*\n\nIs this correct?",
+            parse_mode="Markdown",
+            reply_markup=kb,
+        )
+        return
     processing_msg = None
     try:
         if chat.type == "private":
