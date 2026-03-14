@@ -29,7 +29,7 @@ BURST_WINDOW_SEC = int(os.getenv("BURST_WINDOW_SEC", "30"))
 DTRADE_REF = os.getenv("DTRADE_REF", "https://t.me/dtrade?start=11TYq7LInG").strip()
 TRENDING_URL = os.getenv("TRENDING_URL", "https://t.me/SpyTonTrending").strip()
 DEFAULT_TOKEN_TG = os.getenv("DEFAULT_TOKEN_TG", "https://t.me/SpyTonEco").strip()
-LISTING_URL = os.getenv("LISTING_URL", "https://t.me/TonProjectListing").strip()
+LISTING_URL = os.getenv("LISTING_URL", "https://t.me/SpyTONListing").strip()
 
 DATA_DIR = os.getenv("DATA_DIR", "").strip()
 def _data_path(p: str) -> str:
@@ -1946,15 +1946,18 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
         await update.message.reply_text(
             "*SpyTON BuyBot*\n\n"
-            "This bot is configured *directly inside your group*.\n"
-            "There is no private DM setup anymore.\n\n"
-            "Add the bot to your group and use */start* there.",
+            "Track TON token buys directly in your group with fast setup and easy controls.\n\n"
+            "No private DM setup is needed.\n"
+            "Everything is managed inside your group.\n\n"
+            "Add the bot to your group and tap */start* there to begin.",
             reply_markup=kb,
-            parse_mode="Markdown"
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
         )
     else:
-        await update.message.reply_text(
-            _spyton_home_text(),
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text=_spyton_home_text(),
             reply_markup=_group_home_keyboard(),
             parse_mode="Markdown",
             disable_web_page_preview=True,
@@ -2302,7 +2305,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("Admins only.", show_alert=True)
             return
         AWAITING[user.id] = {"group_id": chat.id, "stage": "GROUP_ADD", "dex": "both"}
-        await q.message.reply_text("👇 Paste the token contract address")
+        await context.bot.send_message(chat_id=chat.id, text="👇 Paste the token contract address")
         return
 
     if data == "START_EDIT":
@@ -2328,7 +2331,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "RETURN_HOME":
-        await q.message.reply_text(_spyton_home_text(), reply_markup=_group_home_keyboard(), parse_mode="Markdown", disable_web_page_preview=True)
+        await context.bot.send_message(chat_id=chat.id, text=_spyton_home_text(), reply_markup=_group_home_keyboard(), parse_mode="Markdown", disable_web_page_preview=True)
         return
 
     if data == "TAB_INFO":
@@ -2401,9 +2404,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         add_url = await build_add_to_group_url(context.application)
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("➕ Add BuyBot to Group", url=add_url)]])
         await q.edit_message_text(
-            "*SpyTON BuyBot*\n\nThis bot is configured *directly inside your group*.\nThere is no private DM setup anymore.\n\nAdd the bot to your group and use */start* there.",
+            "*SpyTON BuyBot*\n\nTrack TON token buys directly in your group with fast setup and easy controls.\n\nNo private DM setup is needed.\nEverything is managed inside your group.\n\nAdd the bot to your group and tap */start* there to begin.",
             reply_markup=kb,
-            parse_mode="Markdown"
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
         )
         return
 
@@ -2419,7 +2423,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("Admins only.", show_alert=True)
             return
         AWAITING[user.id] = {"group_id": chat.id, "stage": "GROUP_ADD", "dex": "both"}
-        await q.message.reply_text("👇 Paste the token contract address")
+        await context.bot.send_message(chat_id=chat.id, text="👇 Paste the token contract address")
         return
 
 
@@ -3168,7 +3172,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if field == "telegram":
                 m = re.search(r"https?://\S+", text)
                 if not m:
-                    await update.message.reply_text("Send a valid link like https://t.me/SpyTonCommunity")
+                    await update.message.reply_text("Send a valid Telegram or portal link.", disable_web_page_preview=True)
                     return
                 if isinstance(tok, dict):
                     tok["telegram"] = m.group(0).strip()
@@ -4312,36 +4316,35 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
     ad_line = f"ad: <a href=\"{h(ad_link)}\">{h(ad_text)}</a>" if ad_link else f"ad: {h(ad_text)}"
 
     def build_group_message() -> str:
-        """Compact group style like the reference (Spent/Got + Price/Liq/MCap/Holders)."""
-        # Make token title clickable to its Telegram link when available
+        """Compact original group style."""
         if tg_link:
-            header_text = f"<b><a href=\"{h(tg_link)}\">{h(title)}</a> Buy!</b>"
+            header_text = f'<a href="{h(tg_link)}"><b>{h(title)} Buy!</b></a>'
         elif chart_link:
-            header_text = f"<b><a href=\"{h(chart_link)}\">{h(title)}</a> Buy!</b>"
+            header_text = f'<a href="{h(chart_link)}"><b>{h(title)} Buy!</b></a>'
         else:
-            header_text = f"<b>{h(title)} Buy!</b>"
+            header_text = f'<b>{h(title)} Buy!</b>'
+
         blocks: List[str] = [header_text]
+
         if strength_html:
-            blocks.append(strength_html)
-        blocks.append("")
-        blocks.append(f"Spent: <b>{ton_amt:,.2f} TON</b>")
+            blocks.extend(["", str(strength_html)])
+
+        blocks.extend(["", f'Spent: <b>{ton_amt:,.2f} TON</b>{h(usd_disp)}'])
+
         if tok_amt and tok_symbol:
             try:
                 tok_amt_f = float(tok_amt)
-                blocks.append(f"Got: <b>{h(fmt_token_amount(tok_amt_f))} {h(tok_symbol)}</b>")
+                blocks.append(f'Got: <b>{h(fmt_token_amount(tok_amt_f))} {h(tok_symbol)}</b>')
             except Exception:
-                blocks.append(f"Got: <b>{h(tok_amt)} {h(tok_symbol)}</b>")
-        blocks.append("")
-        # Buyer + Txn (no New Holder label in group style)
-        buyer_line2 = buyer_html
-        if buyer_url:
-            buyer_line2 = f'<a href="{h(buyer_url)}">{buyer_html}</a>'
-        if tx_url:
-            buyer_line2 = f"{buyer_line2} | <a href=\"{h(tx_url)}\">Txn</a>"
-        blocks.append(buyer_line2)
-        blocks.append("")
+                blocks.append(f'Got: <b>{h(tok_amt)} {h(tok_symbol)}</b>')
 
-        # Market stats (always show the rows; use last-known or '—')
+        buyer_line = buyer_html
+        if buyer_url:
+            buyer_line = f'<a href="{h(buyer_url)}">{buyer_html}</a>'
+        if tx_url:
+            buyer_line = f'{buyer_line} | <a href="{h(tx_url)}">Txn</a>'
+        blocks.extend(["", buyer_line, ""])
+
         def _pos_or_none(v):
             try:
                 if v is None:
@@ -4354,27 +4357,26 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
         price_disp = fmt_usd(_pos_or_none(price_usd), 6) or "—"
         liq_disp = fmt_usd(_pos_or_none(liq_usd), 0) or "—"
         mc_disp = fmt_usd(_pos_or_none(mc_usd), 0) or "—"
-        blocks.append(f"Price: {h(price_disp)}")
-        blocks.append(f"Liquidity: {h(liq_disp)}")
-        blocks.append(f"MCap: {h(mc_disp)}")
-        blocks.append(f"Holders: {h(f'{int(holders):,}' if holders is not None else '—')}")
-        # Inline text links row like the reference: TX | GT | DexS | Telegram | Trending
+        holders_disp = h(f'{int(holders):,}' if holders is not None else '—')
+
+        blocks.append(f'Price: {h(price_disp)}')
+        blocks.append(f'Liquidity: {h(liq_disp)}')
+        blocks.append(f'MCap: {h(mc_disp)}')
+        blocks.append(f'Holders: {holders_disp}')
+
         link_parts = []
         if tx_url:
-            link_parts.append(f"<a href=\"{h(tx_url)}\">TX</a>")
+            link_parts.append(f'<a href="{h(tx_url)}">TX</a>')
         if gt_url:
-            link_parts.append(f"<a href=\"{h(gt_url)}\">GT</a>")
+            link_parts.append(f'<a href="{h(gt_url)}">GT</a>')
         if dex_url:
-            link_parts.append(f"<a href=\"{h(dex_url)}\">DexS</a>")
-        if tg_link:
-            link_parts.append(f"<a href=\"{h(tg_link)}\">Telegram</a>")
+            link_parts.append(f'<a href="{h(dex_url)}">DexS</a>')
         if trending:
-            link_parts.append(f"<a href=\"{h(trending)}\">Trending</a>")
+            link_parts.append(f'<a href="{h(trending)}">Trending</a>')
         if link_parts:
             blocks.append(" | ".join(link_parts))
 
-        blocks.append("")
-        blocks.append(ad_line)
+        blocks.extend(["", ad_line])
         return "\n".join([b for b in blocks if b is not None])
 
     def build_trending_channel_message() -> str:
@@ -4727,7 +4729,7 @@ def build_leaderboard_text() -> str:
 
     nums = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
 
-    text = f"TON TRENDING\n🟢 {h(LEADERBOARD_HEADER_HANDLE)}\n\n"
+    text = f"🟢 {h(LEADERBOARD_HEADER_HANDLE)}\n\n"
     if not top:
         text += "(No data yet)"
         return text
@@ -4809,7 +4811,7 @@ async def leaderboard_loop(app: Application):
 
                 log.exception("build_leaderboard_text error: %s", e)
 
-                text = "<b>TON TRENDING</b>\n🟢 <b>%s</b>\n\nNo data yet — waiting for buys…\n\n<blockquote>To trend use @SpyTONTrndBot to book trend</blockquote>" % (LEADERBOARD_HEADER_HANDLE or "@Spytontrending")
+                text = "🟢 <b>%s</b>\n\nNo data yet — waiting for buys…\n\n<blockquote>To trend use @SpyTONTrndBot to book trend</blockquote>" % (LEADERBOARD_HEADER_HANDLE or "@Spytontrending")
 
             # 1) Edit if possible
             if msg_id:
