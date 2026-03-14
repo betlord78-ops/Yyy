@@ -2358,7 +2358,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "EDIT_LINK":
         AWAITING_EDIT_INPUT[user.id] = {"chat_id": chat.id, "field": "telegram"}
-        await q.message.reply_text("👇 Send your group/portal link (e.g., https://t.me/SpyTonCommunity)")
+        await q.message.reply_text("👇 Send your group/portal link now.", disable_web_page_preview=True)
         return
 
     if data == "EDIT_EMOJI":
@@ -4312,36 +4312,40 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
     ad_line = f"ad: <a href=\"{h(ad_link)}\">{h(ad_text)}</a>" if ad_link else f"ad: {h(ad_text)}"
 
     def build_group_message() -> str:
-        """Compact group style like the reference (Spent/Got + Price/Liq/MCap/Holders)."""
-        # Make token title clickable to its Telegram link when available
+        """Expanded group style to match the larger buy-card look the user wants."""
+        dex_name = h(source) if source else "TON"
         if tg_link:
-            header_text = f"<b><a href=\"{h(tg_link)}\">{h(title)}</a> Buy!</b>"
+            header_text = f'<a href="{h(tg_link)}"><b>{h(title)} Buy!</b></a> — {dex_name}'
         elif chart_link:
-            header_text = f"<b><a href=\"{h(chart_link)}\">{h(title)}</a> Buy!</b>"
+            header_text = f'<a href="{h(chart_link)}"><b>{h(title)} Buy!</b></a> — {dex_name}'
         else:
-            header_text = f"<b>{h(title)} Buy!</b>"
-        blocks: List[str] = [header_text]
+            header_text = f'<b>{h(title)} Buy!</b> — {dex_name}'
+
+        blocks: List[str] = [header_text, ""]
         if strength_html:
             blocks.append(strength_html)
-        blocks.append("")
-        blocks.append(f"Spent: <b>{ton_amt:,.2f} TON</b>")
+            blocks.append("")
+
+        spend_line = f'💵 <b>{ton_amt:,.2f} TON</b>{h(usd_disp)}'
+        blocks.append(spend_line)
+
         if tok_amt and tok_symbol:
             try:
                 tok_amt_f = float(tok_amt)
-                blocks.append(f"Got: <b>{h(fmt_token_amount(tok_amt_f))} {h(tok_symbol)}</b>")
+                blocks.append(f'🔄 <b>{h(fmt_token_amount(tok_amt_f))} {h(tok_symbol)}</b>')
             except Exception:
-                blocks.append(f"Got: <b>{h(tok_amt)} {h(tok_symbol)}</b>")
-        blocks.append("")
-        # Buyer + Txn (no New Holder label in group style)
+                blocks.append(f'🔄 <b>{h(tok_amt)} {h(tok_symbol)}</b>')
+
         buyer_line2 = buyer_html
         if buyer_url:
             buyer_line2 = f'<a href="{h(buyer_url)}">{buyer_html}</a>'
+        if is_new_buyer:
+            buyer_line2 = f'{buyer_line2}: New!'
         if tx_url:
-            buyer_line2 = f"{buyer_line2} | <a href=\"{h(tx_url)}\">Txn</a>"
-        blocks.append(buyer_line2)
+            buyer_line2 = f'{buyer_line2} &nbsp; | &nbsp; <a href="{h(tx_url)}">Txn</a>'
+        blocks.append(f'👤 {buyer_line2}')
         blocks.append("")
 
-        # Market stats (always show the rows; use last-known or '—')
         def _pos_or_none(v):
             try:
                 if v is None:
@@ -4354,22 +4358,22 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
         price_disp = fmt_usd(_pos_or_none(price_usd), 6) or "—"
         liq_disp = fmt_usd(_pos_or_none(liq_usd), 0) or "—"
         mc_disp = fmt_usd(_pos_or_none(mc_usd), 0) or "—"
-        blocks.append(f"Price: {h(price_disp)}")
-        blocks.append(f"Liquidity: {h(liq_disp)}")
-        blocks.append(f"MCap: {h(mc_disp)}")
-        blocks.append(f"Holders: {h(f'{int(holders):,}' if holders is not None else '—')}")
-        # Inline text links row like the reference: TX | GT | DexS | Telegram | Trending
+        holders_disp = h(f'{int(holders):,}' if holders is not None else '—')
+
+        blocks.append(f'Price: <b>{h(price_disp)}</b>')
+        blocks.append(f'Liquidity: <b>{h(liq_disp)}</b>')
+        blocks.append(f'MCap: <b>{h(mc_disp)}</b>')
+        blocks.append(f'Holders: <b>{holders_disp}</b>')
+
         link_parts = []
         if tx_url:
-            link_parts.append(f"<a href=\"{h(tx_url)}\">TX</a>")
+            link_parts.append(f'<a href="{h(tx_url)}">TX</a>')
         if gt_url:
-            link_parts.append(f"<a href=\"{h(gt_url)}\">GT</a>")
+            link_parts.append(f'<a href="{h(gt_url)}">GT</a>')
         if dex_url:
-            link_parts.append(f"<a href=\"{h(dex_url)}\">DexS</a>")
-        if tg_link:
-            link_parts.append(f"<a href=\"{h(tg_link)}\">Telegram</a>")
+            link_parts.append(f'<a href="{h(dex_url)}">DexS</a>')
         if trending:
-            link_parts.append(f"<a href=\"{h(trending)}\">Trending</a>")
+            link_parts.append(f'<a href="{h(trending)}">Trending</a>')
         if link_parts:
             blocks.append(" | ".join(link_parts))
 
