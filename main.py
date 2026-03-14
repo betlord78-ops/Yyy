@@ -1921,7 +1921,10 @@ async def send_customize_panel(chat_id: int, context: ContextTypes.DEFAULT_TYPE,
     if edit:
         await msg.edit_text(text, parse_mode="Markdown", reply_markup=kb, disable_web_page_preview=True)
     else:
-        await msg.reply_text(text, parse_mode="Markdown", reply_markup=kb, disable_web_page_preview=True)
+        await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown", reply_markup=kb, disable_web_page_preview=True)
+
+async def _send_customize_prompt(chat_id: int, context: ContextTypes.DEFAULT_TYPE, text: str):
+    return await context.bot.send_message(chat_id=chat_id, text=text, disable_web_page_preview=True)
 
 # -------------------- UI --------------------
 async def build_add_to_group_url(app: Application) -> str:
@@ -2350,28 +2353,28 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "EDIT_STEP":
-        AWAITING_EDIT_INPUT[user.id] = {"chat_id": chat.id, "field": "step"}
-        await q.message.reply_text("👇 Enter the buy step amount in TON (e.g., 1)")
+        prompt = await _send_customize_prompt(chat.id, context, "👇 Enter the buy step amount in TON (e.g., 1)")
+        AWAITING_EDIT_INPUT[user.id] = {"chat_id": chat.id, "field": "step", "prompt_msg_id": prompt.message_id}
         return
 
     if data == "EDIT_MIN":
-        AWAITING_EDIT_INPUT[user.id] = {"chat_id": chat.id, "field": "min_buy"}
-        await q.message.reply_text("👇 Enter the minimum buy amount in USD (e.g., 10)")
+        prompt = await _send_customize_prompt(chat.id, context, "👇 Enter the minimum buy amount in USD (e.g., 10)")
+        AWAITING_EDIT_INPUT[user.id] = {"chat_id": chat.id, "field": "min_buy", "prompt_msg_id": prompt.message_id}
         return
 
     if data == "EDIT_LINK":
-        AWAITING_EDIT_INPUT[user.id] = {"chat_id": chat.id, "field": "telegram"}
-        await context.bot.send_message(chat_id=chat.id, text="👇 Send your group/portal link now.", disable_web_page_preview=True)
+        prompt = await _send_customize_prompt(chat.id, context, "👇 Send your group/portal link now.")
+        AWAITING_EDIT_INPUT[user.id] = {"chat_id": chat.id, "field": "telegram", "prompt_msg_id": prompt.message_id}
         return
 
     if data == "EDIT_EMOJI":
-        AWAITING_EDIT_INPUT[user.id] = {"chat_id": chat.id, "field": "emoji"}
-        await q.message.reply_text("👇 Send the emoji to use in buy posts")
+        prompt = await _send_customize_prompt(chat.id, context, "👇 Send the emoji to use in buy posts")
+        AWAITING_EDIT_INPUT[user.id] = {"chat_id": chat.id, "field": "emoji", "prompt_msg_id": prompt.message_id}
         return
 
     if data == "EDIT_MEDIA":
-        AWAITING_IMAGE[user.id] = chat.id
-        await q.message.reply_text("👇 Send your media now as a Telegram photo, GIF, or short video.")
+        prompt = await _send_customize_prompt(chat.id, context, "👇 Send your media now as a Telegram photo, GIF, or short video.")
+        AWAITING_IMAGE[user.id] = {"chat_id": chat.id, "prompt_msg_id": prompt.message_id}
         return
 
     if data == "CONFIRM_PREVIEW":
@@ -3145,6 +3148,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cfg = AWAITING_EDIT_INPUT.get(user.id) or {}
         target_chat_id = int(cfg.get("chat_id") or 0)
         field = str(cfg.get("field") or "")
+        prompt_msg_id = cfg.get("prompt_msg_id")
         if chat.type not in ("group", "supergroup") or chat.id != target_chat_id:
             return
         if not await is_admin(context.bot, target_chat_id, user.id):
@@ -3158,7 +3162,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 s["strength_step_ton"] = float(text)
                 save_groups()
                 AWAITING_EDIT_INPUT.pop(user.id, None)
-                await update.message.reply_text("✅ Buy step updated.")
+                try:
+                    if prompt_msg_id:
+                        await context.bot.delete_message(chat_id=target_chat_id, message_id=int(prompt_msg_id))
+                except Exception:
+                    pass
+                try:
+                    await update.message.delete()
+                except Exception:
+                    pass
                 await send_customize_panel(target_chat_id, context, update.message)
                 return
             if field == "min_buy":
@@ -3166,7 +3178,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 s["min_buy_usd"] = float(text)
                 save_groups()
                 AWAITING_EDIT_INPUT.pop(user.id, None)
-                await update.message.reply_text("✅ Min buy updated.")
+                try:
+                    if prompt_msg_id:
+                        await context.bot.delete_message(chat_id=target_chat_id, message_id=int(prompt_msg_id))
+                except Exception:
+                    pass
+                try:
+                    await update.message.delete()
+                except Exception:
+                    pass
                 await send_customize_panel(target_chat_id, context, update.message)
                 return
             if field == "telegram":
@@ -3179,6 +3199,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     save_groups()
                 AWAITING_EDIT_INPUT.pop(user.id, None)
                 try:
+                    if prompt_msg_id:
+                        await context.bot.delete_message(chat_id=target_chat_id, message_id=int(prompt_msg_id))
+                except Exception:
+                    pass
+                try:
                     await update.message.delete()
                 except Exception:
                     pass
@@ -3188,7 +3213,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 s["strength_emoji"] = text[:12]
                 save_groups()
                 AWAITING_EDIT_INPUT.pop(user.id, None)
-                await update.message.reply_text("✅ Emoji updated.")
+                try:
+                    if prompt_msg_id:
+                        await context.bot.delete_message(chat_id=target_chat_id, message_id=int(prompt_msg_id))
+                except Exception:
+                    pass
+                try:
+                    await update.message.delete()
+                except Exception:
+                    pass
                 await send_customize_panel(target_chat_id, context, update.message)
                 return
         except Exception:
