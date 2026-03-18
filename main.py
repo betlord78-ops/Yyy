@@ -24,7 +24,7 @@ log = logging.getLogger("spyton_public")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 TONAPI_KEY = os.getenv("TONAPI_KEY", "").strip()
 TONAPI_BASE = os.getenv("TONAPI_BASE", "https://tonapi.io").strip().rstrip("/")
-POLL_INTERVAL = max(0.75, float(os.getenv("POLL_INTERVAL", "0.75")))
+POLL_INTERVAL = max(0.35, float(os.getenv("POLL_INTERVAL", "0.45")))
 BURST_WINDOW_SEC = int(os.getenv("BURST_WINDOW_SEC", "30"))
 DTRADE_REF = os.getenv("DTRADE_REF", "https://t.me/dtrade?start=11TYq7LInG").strip()
 TRENDING_URL = os.getenv("TRENDING_URL", "https://t.me/SpyTonTrending").strip()
@@ -4296,9 +4296,11 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
             emo = str(s.get("strength_emoji") or "🟢")
             n = 1 if ton_amt > 0 else 0
             if step > 0:
-                n = max(1, int(ton_amt // step))
-            n = min(max_n, n)
-            per_line = 15
+                # Keep the count readable on larger buys.
+                effective_step = max(step, float(ton_amt) / 9.0) if ton_amt > 0 else step
+                n = max(1, int(float(ton_amt) // effective_step))
+            n = min(max_n, max(1, n))
+            per_line = 12
             rows = []
             for i in range(0, n, per_line):
                 rows.append(repeat_emoji(emo, min(per_line, n - i)))
@@ -4364,15 +4366,15 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
     ad_line = f"ad: <a href=\"{h(ad_link)}\">{h(ad_text)}</a>" if ad_link else f"ad: {h(ad_text)}"
 
     def build_group_message() -> str:
-        """Group buy card styled like the provided screenshot."""
-        header_token = (tok_symbol or title or "TOKEN").upper()
-        header_inner = f'<b>{h(header_token)} BUY!</b>'
+        """Group buy card styled like the latest requested screenshot."""
+        header_token = tok_symbol or title or "TOKEN"
+        header_inner = f'<b>{h(header_token)} Buy!</b>'
         if tg_link:
-            header = f'💠 <a href="{h(tg_link)}">{header_inner}</a>'
+            header = f'<a href="{h(tg_link)}">{header_inner}</a>'
         elif chart_link:
-            header = f'💠 <a href="{h(chart_link)}">{header_inner}</a>'
+            header = f'<a href="{h(chart_link)}">{header_inner}</a>'
         else:
-            header = f'💠 {header_inner}'
+            header = header_inner
 
         token_line = ""
         if tok_amt and tok_symbol:
@@ -4381,23 +4383,22 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
                 sym_html = f'<a href="{h(tg_link)}">{h(tok_symbol)}</a>'
             try:
                 tok_amt_f = float(tok_amt)
-                token_line = f'🔁 <b>{h(fmt_token_amount(tok_amt_f))} {sym_html}</b>'
+                token_line = f'<b>Got:</b> {h(fmt_token_amount(tok_amt_f))} {sym_html}'
             except Exception:
-                token_line = f'🔁 <b>{h(tok_amt)} {sym_html}</b>'
-
-        holders_text = f"{holders:,}" if isinstance(holders, int) else (str(holders) if holders is not None else "—")
-        holders_line_local = f'👥 {h(holders_text)} Holders'
+                token_line = f'<b>Got:</b> {h(tok_amt)} {sym_html}'
 
         buyer_html_local = h(buyer_short)
         if buyer_url:
             buyer_html_local = f'<a href="{h(buyer_url)}">{buyer_html_local}</a>'
-        if tx_url:
-            if is_new_buyer:
-                buyer_line_local = f'👤 {buyer_html_local}: New! | <a href="{h(tx_url)}">Txn</a>'
-            else:
-                buyer_line_local = f'👤 {buyer_html_local} | <a href="{h(tx_url)}">Txn</a>'
-        else:
-            buyer_line_local = f'👤 {buyer_html_local}: New! | Txn' if is_new_buyer else f'👤 {buyer_html_local} | Txn'
+
+        change_part = ""
+        if isinstance(change_pct, (int, float)):
+            try:
+                v = float(change_pct)
+                sign = "+" if v > 0 else ""
+                change_part = f': {sign}{v:.1f}%'
+            except Exception:
+                change_part = ""
 
         def _price_disp(v):
             try:
@@ -4407,26 +4408,41 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
             except Exception:
                 return "—"
 
-        price_line_local = f'🏷 Price: {h(_price_disp(price_usd))}'
-        mc_line_local = f'📊 MarketCap: {h(fmt_usd(_pos_or_none(mc_usd), 0) or "—")}'
+        liq_val = fmt_usd(_pos_or_none(liq_usd), 0) or "—"
+        mc_val = fmt_usd(_pos_or_none(mc_usd), 0) or "—"
+        holders_text = f"{holders:,}" if isinstance(holders, int) else (str(holders) if holders is not None else "—")
 
-        listing_part_local = f'❤️ <a href="{h(LISTING_URL)}">Listing</a>' if LISTING_URL else '❤️ Listing'
-        gt_link_local = gt_url or gecko_terminal_pool_url(pair_for_links) if pair_for_links else gt_url
-        gt_part_local = f'🦎 <a href="{h(gt_link_local)}">GT</a>' if gt_link_local else '🦎 GT'
-        chart_part_local = f'📈 <a href="{h(chart_link)}">Chart</a>' if chart_link else '📈 Chart'
-        links_row_local = " | ".join([p for p in [listing_part_local, gt_part_local, chart_part_local] if p])
+        gt_link_local = gt_url or (gecko_terminal_pool_url(pair_for_links) if pair_for_links else "")
+        tx_part_local = f'<a href="{h(tx_url)}">TX</a>' if tx_url else 'TX'
+        gt_part_local = f'<a href="{h(gt_link_local)}">GT</a>' if gt_link_local else 'GT'
+        dexs_part_local = f'<a href="{h(dex_url)}">DexS</a>' if dex_url else 'DexS'
+        telegram_part_local = f'<a href="{h(tg_link)}">Telegram</a>' if tg_link else 'Telegram'
+        trending_part_local = f'<a href="{h(trending)}">Trending</a>' if trending else 'Trending'
+        links_row_local = " | ".join([tx_part_local, gt_part_local, dexs_part_local, telegram_part_local, trending_part_local])
+
+        buyer_line_local = f'{buyer_html_local}{change_part}'
 
         blocks: List[str] = [header]
         if strength_html:
             blocks.extend(["", strength_html])
-        blocks.extend(["", f'💵 <b>{ton_amt:,.2f} TON</b>{h(usd_disp)}'])
+        blocks.extend([
+            "",
+            f'<b>Spent:</b> {ton_amt:,.2f} TON{h(usd_disp)}',
+        ])
         if token_line:
             blocks.append(token_line)
-        blocks.append(holders_line_local)
-        blocks.append(buyer_line_local)
-        blocks.append(price_line_local)
-        blocks.append(mc_line_local)
-        blocks.extend(["", links_row_local, ad_line])
+        blocks.extend([
+            "",
+            buyer_line_local,
+            f'Price: {h(_price_disp(price_usd))}',
+            f'Liquidity: {h(liq_val)}',
+            f'MCap: <b>{h(mc_val)}</b>',
+            f'Holders: <b>{h(holders_text)}</b>',
+            "",
+            links_row_local,
+            "",
+            f'Advertisement: <a href="{h(ad_link)}">{h(ad_text)}</a>' if ad_link else f'Advertisement: {h(ad_text)}',
+        ])
         return "\n".join([b for b in blocks if b is not None])
 
     def build_trending_channel_message() -> str:
@@ -4622,7 +4638,7 @@ async def tracker_loop(app: Application):
         except Exception as e:
             log.exception("tracker loop error: %s", e)
         elapsed = time.monotonic() - cycle_started
-        await asyncio.sleep(max(0.10, POLL_INTERVAL - elapsed))
+        await asyncio.sleep(max(0.05, POLL_INTERVAL - elapsed))
 
 
 
