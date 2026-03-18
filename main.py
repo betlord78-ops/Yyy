@@ -4442,7 +4442,7 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
             "",
             links_row_local,
             "",
-            f'Advertisement: <a href="{h(ad_link)}">{h(ad_text)}</a>' if ad_link else f'Advertisement: {h(ad_text)}',
+            f'Ad: <a href="{h(ad_link)}">You can book an ad here</a>' if ad_link else 'Ad: You can book an ad here',
         ])
         return "\n".join([b for b in blocks if b is not None])
 
@@ -4554,12 +4554,11 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
             book_btn = InlineKeyboardButton("Book Trending", url=BOOK_TRENDING_URL)
             return InlineKeyboardMarkup([[book_btn]])
 
-        row = []
-        if TRENDING_URL:
-            row.append(InlineKeyboardButton("Trending", url=TRENDING_URL))
+        btn_label_symbol = (tok_symbol or title or "TOKEN").strip().upper()
+        btn_label_symbol = re.sub(r"[^A-Z0-9_]", "", btn_label_symbol) or "TOKEN"
         if buy_url:
-            row.append(InlineKeyboardButton("DTrade", url=buy_url))
-        return InlineKeyboardMarkup([row]) if row else InlineKeyboardMarkup([])
+            return InlineKeyboardMarkup([[InlineKeyboardButton(f"BUY ${btn_label_symbol}", url=buy_url)]])
+        return InlineKeyboardMarkup([])
 
     async def _send(dest_chat_id: int):
         if is_trending_dest(int(dest_chat_id)) and float(ton_amt or 0.0) < float(TRENDING_MIN_BUY_TON or 0.0):
