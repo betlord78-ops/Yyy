@@ -62,6 +62,7 @@ LEADERBOARD_CHAT_ID_STR = os.getenv("LEADERBOARD_CHAT_ID", "").strip()  # option
 # If MIRROR_TO_TRENDING is truthy, every buy posted in any configured group will also be posted there.
 TRENDING_POST_CHAT_ID = os.getenv("TRENDING_POST_CHAT_ID", "").strip()
 MIRROR_TO_TRENDING = str(os.getenv("MIRROR_TO_TRENDING", "0")).strip().lower() in ("1","true","yes","on")
+TRENDING_MIN_BUY_TON = float(os.getenv("TRENDING_MIN_BUY_TON", "5").strip() or 5)
 
 # Owner-only Ads system
 OWNER_IDS = [int(x) for x in re.split(r"[ ,;]+", os.getenv("OWNER_IDS", "").strip()) if x.strip().isdigit()]
@@ -4561,6 +4562,8 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
         return InlineKeyboardMarkup([row]) if row else InlineKeyboardMarkup([])
 
     async def _send(dest_chat_id: int):
+        if is_trending_dest(int(dest_chat_id)) and float(ton_amt or 0.0) < float(TRENDING_MIN_BUY_TON or 0.0):
+            return
         kb = build_buy_keyboard(int(dest_chat_id))
         local_msg = build_trending_channel_message() if is_trending_dest(int(dest_chat_id)) else build_group_message()
 
