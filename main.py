@@ -4364,84 +4364,16 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
     ad_line = f"ad: <a href=\"{h(ad_link)}\">{h(ad_text)}</a>" if ad_link else f"ad: {h(ad_text)}"
 
     def build_group_message() -> str:
-        """Compact original group style."""
+        """Buy card styled like the provided screenshot."""
+        header_token = (tok_symbol or title or "TOKEN").upper()
+        header_inner = f'<b>{h(header_token)} BUY!</b>'
         if tg_link:
-            header_text = f'<a href="{h(tg_link)}"><b>{h(title)} Buy!</b></a>'
+            header = f'💠 <a href="{h(tg_link)}">{header_inner}</a>'
         elif chart_link:
-            header_text = f'<a href="{h(chart_link)}"><b>{h(title)} Buy!</b></a>'
+            header = f'💠 <a href="{h(chart_link)}">{header_inner}</a>'
         else:
-            header_text = f'<b>{h(title)} Buy!</b>'
+            header = f'💠 {header_inner}'
 
-        blocks: List[str] = [header_text]
-
-        if strength_html:
-            blocks.extend(["", str(strength_html)])
-
-        blocks.extend(["", f'Spent: <b>{ton_amt:,.2f} TON</b>{h(usd_disp)}'])
-
-        if tok_amt and tok_symbol:
-            try:
-                tok_amt_f = float(tok_amt)
-                blocks.append(f'Got: <b>{h(fmt_token_amount(tok_amt_f))} {h(tok_symbol)}</b>')
-            except Exception:
-                blocks.append(f'Got: <b>{h(tok_amt)} {h(tok_symbol)}</b>')
-
-        buyer_line = buyer_html
-        if buyer_url:
-            buyer_line = f'<a href="{h(buyer_url)}">{buyer_html}</a>'
-        if tx_url:
-            buyer_line = f'{buyer_line} | <a href="{h(tx_url)}">Txn</a>'
-        blocks.extend(["", buyer_line, ""])
-
-        def _pos_or_none(v):
-            try:
-                if v is None:
-                    return None
-                fv = float(v)
-                return fv if fv > 0 else None
-            except Exception:
-                return None
-
-        price_disp = fmt_usd(_pos_or_none(price_usd), 6) or "—"
-        liq_disp = fmt_usd(_pos_or_none(liq_usd), 0) or "—"
-        mc_disp = fmt_usd(_pos_or_none(mc_usd), 0) or "—"
-        holders_disp = h(f'{int(holders):,}' if holders is not None else '—')
-
-        blocks.append(f'Price: {h(price_disp)}')
-        blocks.append(f'Liquidity: {h(liq_disp)}')
-        blocks.append(f'MCap: {h(mc_disp)}')
-        blocks.append(f'Holders: {holders_disp}')
-
-        link_parts = []
-        if tx_url:
-            link_parts.append(f'<a href="{h(tx_url)}">TX</a>')
-        if gt_url:
-            link_parts.append(f'<a href="{h(gt_url)}">GT</a>')
-        if dex_url:
-            link_parts.append(f'<a href="{h(dex_url)}">DexS</a>')
-        if trending:
-            link_parts.append(f'<a href="{h(trending)}">Trending</a>')
-        if link_parts:
-            blocks.append(" | ".join(link_parts))
-
-        blocks.extend(["", ad_line])
-        return "\n".join([b for b in blocks if b is not None])
-
-    def build_trending_channel_message() -> str:
-        """Trending channel style (only). Keeps all clickable links, but uses the requested layout."""
-        # Header: | TOKEN Buy! (TOKEN clickable to Telegram when available)
-        header_token = tok_symbol or title
-        if tg_link:
-            header = f'| <a href="{h(tg_link)}"><b>{h(header_token)}</b></a> Buy!'
-        elif chart_link:
-            header = f'| <a href="{h(chart_link)}"><b>{h(header_token)}</b></a> Buy!'
-        else:
-            header = f'| <b>{h(header_token)}</b> Buy!'
-
-        # Checkmark strength line (static like your example)
-        checks = "✅" * 26
-
-        # Token amount line with 🔀 and clickable symbol (if TG exists)
         token_line = ""
         if tok_amt and tok_symbol:
             sym_html = h(tok_symbol)
@@ -4449,73 +4381,56 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
                 sym_html = f'<a href="{h(tg_link)}">{h(tok_symbol)}</a>'
             try:
                 tok_amt_f = float(tok_amt)
-                token_line = f'🔀 <b>{h(fmt_token_amount(tok_amt_f))} {sym_html}</b>'
+                token_line = f'🔁 <b>{h(fmt_token_amount(tok_amt_f))} {sym_html}</b>'
             except Exception:
-                token_line = f'🔀 <b>{h(tok_amt)} {sym_html}</b>'
+                token_line = f'🔁 <b>{h(tok_amt)} {sym_html}</b>'
 
-        # Holders compact (1.17K, 2.3M)
-        def _fmt_compact_int(n: Optional[int]) -> str:
-            if n is None:
-                return "—"
-            try:
-                x = float(n)
-            except Exception:
-                return "—"
-            if x >= 1_000_000:
-                return f"{x/1_000_000:.2f}".rstrip("0").rstrip(".") + "M"
-            if x >= 1_000:
-                return f"{x/1_000:.2f}".rstrip("0").rstrip(".") + "K"
-            return f"{int(x):,}"
+        holders_text = f"{holders:,}" if isinstance(holders, int) else (str(holders) if holders is not None else "—")
+        holders_line_local = f'👥 {h(holders_text)} Holders'
 
-        holders_compact = _fmt_compact_int(int(holders) if holders is not None else None)
-        holders_line_ch = f"🔀 {h(holders_compact)} Holders"
-
-        # Buyer line (wallet clickable) + change % (h6/h1) + Txn clickable
-        buyer_html2 = h(buyer_short)
+        buyer_html_local = h(buyer_short)
         if buyer_url:
-            buyer_html2 = f'<a href="{h(buyer_url)}">{buyer_html2}</a>'
-        pct_part = ""
-        if isinstance(change_pct, (int, float)):
+            buyer_html_local = f'<a href="{h(buyer_url)}">{buyer_html_local}</a>'
+        if tx_url:
+            buyer_line_local = f'👤 {buyer_html_local}: New! &nbsp; | &nbsp; <a href="{h(tx_url)}">Txn</a>' if is_new_buyer else f'👤 {buyer_html_local} &nbsp; | &nbsp; <a href="{h(tx_url)}">Txn</a>'
+        else:
+            buyer_line_local = f'👤 {buyer_html_local}: New! | Txn' if is_new_buyer else f'👤 {buyer_html_local} | Txn'
+
+        def _price_disp(v):
             try:
-                v = float(change_pct)
-                sign = "+" if v > 0 else ""
-                pct_part = f": {sign}{v:.1f}%"
+                if v is None:
+                    return "—"
+                return fmt_usd(float(v), 6) or "—"
             except Exception:
-                pct_part = ""
-        txn_part = f' | <a href="{h(tx_url)}">Txn</a>' if tx_url else " | Txn"
-        buyer_line_ch = f"👤 {buyer_html2}{pct_part}{txn_part}"
+                return "—"
 
-        # Price + MarketCap
-        price_line = "💵 Price: —"
-        if price_usd is not None:
-            try:
-                price_line = f"💵 Price: ${float(price_usd):,.6f}"
-            except Exception:
-                price_line = "💵 Price: —"
-        mc_line_ch = f"💵 MarketCap: {h(fmt_usd(mc_usd, 0) or '—')}"
+        price_line_local = f'🏷 Price: {h(_price_disp(price_usd))}'
+        mc_line_local = f'📊 MarketCap: {h(fmt_usd(_pos_or_none(mc_usd), 0) or "—")}'
 
-        # Links row: Listing | Buy | Chart (all clickable)
-        listing_part = f'💎 <a href="{h(LISTING_URL)}">Listing</a>' if LISTING_URL else "💎 Listing"
-        buy_part = f'🐸 <a href="{h(buy_url)}">Buy</a>' if buy_url else "🐸 Buy"
-        chart_part = f'📊 <a href="{h(chart_link)}">Chart</a>' if chart_link else "📊 Chart"
-        links_row = " | ".join([p for p in [listing_part, buy_part, chart_part] if p])
+        listing_part_local = f'❤️ <a href="{h(LISTING_URL)}">Listing</a>' if LISTING_URL else '❤️ Listing'
+        gt_part_local = f'🦎 <a href="{h(gt_url)}">GT</a>' if gt_url else '🦎 GT'
+        chart_part_local = f'📈 <a href="{h(chart_link)}">Chart</a>' if chart_link else '📈 Chart'
+        links_row_local = " &nbsp; | &nbsp; ".join([p for p in [listing_part_local, gt_part_local, chart_part_local] if p])
 
-        blocks: List[str] = []
-        blocks.append(header)
-        blocks.append("")
-        blocks.append(checks)
-        blocks.append("")
-        blocks.append(f" ꘜ  {ton_amt:,.2f} TON{h(usd_disp)}")
+        blocks: List[str] = [header]
+        if strength_html:
+            blocks.extend(["", strength_html])
+        blocks.extend([
+            "",
+            f'💵 <b>{ton_amt:,.2f} TON</b>{h(usd_disp)}',
+        ])
         if token_line:
             blocks.append(token_line)
-        blocks.append(holders_line_ch)
-        blocks.append(buyer_line_ch)
-        blocks.append(price_line)
-        blocks.append(mc_line_ch)
-        blocks.append("")
-        blocks.append(links_row)
-        blocks.append(ad_line)
+        blocks.append(holders_line_local)
+        blocks.append(buyer_line_local)
+        blocks.append(price_line_local)
+        blocks.append(mc_line_local)
+        blocks.extend(["", links_row_local, ad_line])
         return "\n".join([b for b in blocks if b is not None])
+
+    def build_trending_channel_message() -> str:
+        return build_group_message()
+
     def is_trending_dest(dest_chat_id: int) -> bool:
         return bool(TRENDING_POST_CHAT_ID and str(dest_chat_id) == str(TRENDING_POST_CHAT_ID))
 
@@ -4527,17 +4442,14 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
     buy_media_type = str(s.get("buy_media_type") or "photo").strip().lower()
     use_image = bool(s.get("buy_image_on", False)) and bool(buy_file_id)
 
-    # Buttons:
-    # - Groups: compact utility row + Buy with dTrade
-    # - Trending channel: Book Trending ONLY
+    # Buttons: Trending + DTrade (same style as screenshot)
     def build_buy_keyboard(dest_chat_id: int) -> InlineKeyboardMarkup:
-        if is_trending_dest(int(dest_chat_id)):
-            book_btn = InlineKeyboardButton("Book Trending", url=BOOK_TRENDING_URL)
-            return InlineKeyboardMarkup([[book_btn]])
-
-        # Groups: one clean Buy button (text links are in message body)
-        buy_btn = InlineKeyboardButton(f"Buy {tok_symbol or title} with dTrade", url=buy_url)
-        return InlineKeyboardMarkup([[buy_btn]])
+        row = []
+        if TRENDING_URL:
+            row.append(InlineKeyboardButton("Trending", url=TRENDING_URL))
+        if buy_url:
+            row.append(InlineKeyboardButton("DTrade", url=buy_url))
+        return InlineKeyboardMarkup([row]) if row else InlineKeyboardMarkup([])
 
     async def _send(dest_chat_id: int):
         kb = build_buy_keyboard(int(dest_chat_id))
