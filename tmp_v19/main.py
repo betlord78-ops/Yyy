@@ -24,7 +24,7 @@ log = logging.getLogger("spyton_public")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 TONAPI_KEY = os.getenv("TONAPI_KEY", "").strip()
 TONAPI_BASE = os.getenv("TONAPI_BASE", "https://tonapi.io").strip().rstrip("/")
-POLL_INTERVAL = max(0.75, float(os.getenv("POLL_INTERVAL", "0.75")))
+POLL_INTERVAL = max(0.35, float(os.getenv("POLL_INTERVAL", "0.45")))
 BURST_WINDOW_SEC = int(os.getenv("BURST_WINDOW_SEC", "30"))
 DTRADE_REF = os.getenv("DTRADE_REF", "https://t.me/dtrade?start=11TYq7LInG").strip()
 TRENDING_URL = os.getenv("TRENDING_URL", "https://t.me/SpyTonTrending").strip()
@@ -62,6 +62,7 @@ LEADERBOARD_CHAT_ID_STR = os.getenv("LEADERBOARD_CHAT_ID", "").strip()  # option
 # If MIRROR_TO_TRENDING is truthy, every buy posted in any configured group will also be posted there.
 TRENDING_POST_CHAT_ID = os.getenv("TRENDING_POST_CHAT_ID", "").strip()
 MIRROR_TO_TRENDING = str(os.getenv("MIRROR_TO_TRENDING", "0")).strip().lower() in ("1","true","yes","on")
+TRENDING_MIN_BUY_TON = float(os.getenv("TRENDING_MIN_BUY_TON", "5").strip() or 5)
 
 # Owner-only Ads system
 OWNER_IDS = [int(x) for x in re.split(r"[ ,;]+", os.getenv("OWNER_IDS", "").strip()) if x.strip().isdigit()]
@@ -1260,6 +1261,104 @@ def tonapi_account_events_subject(address: str, limit: int = 30) -> List[Dict[st
     ev = js.get("events") if isinstance(js, dict) else None
     return ev if isinstance(ev, list) else []
 
+
+def blum_extract_buys_from_tonapi_event(ev: Dict[str, Any], token_addr: str) -> List[Dict[str, Any]]:
+    """Best-effort parser for Blum bonding buys from generic TonAPI events.
+
+    Heuristic:
+    - Look for a JettonTransfer of the tracked token to a user wallet.
+    - In the same event, estimate TON spent from the same wallet's outgoing TON transfer.
+    This is intentionally permissive because Blum bonding events may not look like DEX swaps.
+    """
+    token_addr = str(token_addr or '').strip()
+    if not token_addr or not isinstance(ev, dict):
+        return []
+    actions = ev.get('actions') or []
+    if not isinstance(actions, list) or not actions:
+        return []
+
+    def _addr(x: Any) -> str:
+        if isinstance(x, dict):
+            return str(x.get('address') or x.get('account') or x.get('wallet') or x.get('id') or '').strip()
+        return str(x or '').strip()
+
+    def _to_float_amt(v: Any, decimals: int = 9) -> Optional[float]:
+        try:
+            if v is None or v == '':
+                return None
+            if isinstance(v, (int, float)):
+                vv = float(v)
+                if vv > 1e12:
+                    return vv / float(10 ** decimals)
+                return vv
+            s = str(v).strip()
+            if not s:
+                return None
+            if re.fullmatch(r'-?\d+', s):
+                iv = int(s)
+                if abs(iv) > 1_000_000_000_000:
+                    return iv / float(10 ** decimals)
+                return float(iv)
+            return float(s)
+        except Exception:
+            return None
+
+    token_decimals = 9
+    try:
+        token_decimals = int(get_jetton_meta(token_addr).get('decimals') or 9)
+    except Exception:
+        token_decimals = 9
+
+    candidates = []
+    ton_out_by_sender: Dict[str, float] = {}
+    for act in actions:
+        if not isinstance(act, dict):
+            continue
+        at = str(act.get('type') or '').lower()
+        jt = act.get('JettonTransfer') or act.get('jetton_transfer') or act.get('jettonTransfer') or {}
+        if isinstance(jt, dict):
+            jetton = jt.get('jetton') or {}
+            jetton_addr = _addr(jetton)
+            if jetton_addr == token_addr:
+                recip = _addr(jt.get('recipient') or jt.get('recipient_wallet') or jt.get('to'))
+                sender = _addr(jt.get('sender') or jt.get('sender_wallet') or jt.get('from'))
+                if recip and recip != token_addr:
+                    amt = _to_float_amt(jt.get('amount') or jt.get('jetton_amount') or jt.get('quantity'), token_decimals)
+                    if amt and amt > 0:
+                        candidates.append({'buyer': recip, 'sender': sender, 'token_amount': amt})
+        tt = act.get('TonTransfer') or act.get('ton_transfer') or act.get('tonTransfer') or {}
+        if isinstance(tt, dict):
+            sender = _addr(tt.get('sender') or tt.get('from'))
+            recip = _addr(tt.get('recipient') or tt.get('to'))
+            amt = _to_float_amt(tt.get('amount') or tt.get('value') or tt.get('ton_amount'), 9)
+            if sender and amt and amt > 0:
+                # prefer user -> bonding contract over internal movements
+                prev = ton_out_by_sender.get(sender) or 0.0
+                if amt > prev and sender != recip:
+                    ton_out_by_sender[sender] = amt
+        # some events are generic smart contract execs but still include sender/value hints
+        if at in ('smartcontractexec', 'smart_contract_exec'):
+            ex = act.get('SmartContractExec') or act.get('smart_contract_exec') or {}
+            if isinstance(ex, dict):
+                sender = _addr(ex.get('executor') or ex.get('sender') or ex.get('from'))
+                val = _to_float_amt(ex.get('value') or ex.get('amount') or ex.get('ton_attached'), 9)
+                if sender and val and val > 0:
+                    prev = ton_out_by_sender.get(sender) or 0.0
+                    if val > prev:
+                        ton_out_by_sender[sender] = val
+
+    out = []
+    txh = tonapi_event_tx_hash(ev)
+    for c in candidates:
+        buyer = c.get('buyer') or ''
+        ton_amt = ton_out_by_sender.get(buyer)
+        if ton_amt is None:
+            ton_amt = ton_out_by_sender.get(c.get('sender') or '', 0.0)
+        if ton_amt is None:
+            ton_amt = 0.0
+        out.append({'tx': txh, 'buyer': buyer, 'ton': float(ton_amt or 0.0), 'token_amount': c.get('token_amount')})
+    return out
+
 def tonapi_event_tx_hash(ev: Dict[str, Any]) -> str:
     """Best-effort extraction of a real tx hash from a TonAPI event."""
     if not isinstance(ev, dict):
@@ -2162,6 +2261,9 @@ async def addtoken_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "holders": holders_seed,
         "ston_pool": ston_pool,
         "dedust_pool": dedust_pool,
+        "is_blum_candidate": bool(not ston_pool and not dedust_pool),
+        "last_blum_event_id": None,
+        "last_blum_event_ts": 0,
         "set_at": int(time.time()),
         "init_done": True,
         "paused": False,
@@ -2363,8 +2465,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "EDIT_LINK":
-        AWAITING_EDIT_INPUT[user.id] = {"chat_id": chat.id, "field": "telegram"}
-        await q.message.reply_text("👇 Send your group/portal link (e.g., https://t.me/SpyTonCommunity)")
+        prompt = await _send_customize_prompt(chat.id, context, "👇 Send your group/portal link now.")
+        AWAITING_EDIT_INPUT[user.id] = {"chat_id": chat.id, "field": "telegram", "prompt_msg_id": prompt.message_id}
         return
 
     if data == "EDIT_EMOJI":
@@ -3307,10 +3409,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             holders = int(info.get("holders_count") or 0)
         except Exception:
             pass
+        _ston_preview = find_stonfi_ton_pair_for_token(addr)
+        _dedust_preview = find_dedust_ton_pair_for_token(addr)
+        _blum_hint = bool(not _ston_preview and not _dedust_preview)
         PENDING_TOKEN_PREVIEW[_preview_key(chat.id, user.id)] = {"address": addr, "telegram": tg_url, "name": name, "symbol": sym, "holders": holders}
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("CLICK TO CONFIRM", callback_data="CONFIRM_PREVIEW")]])
         await update.message.reply_text(
-            f"*Token Details*\nName: *{name}*\nSymbol: *{sym}*\nHolders: *{holders}*\n\nIs this correct?",
+            f"*Token Details*\nName: *{name}*\nSymbol: *{sym}*\nHolders: *{holders}*\nMode: *{'Blum bonding candidate' if _blum_hint else 'DEX pool detected'}*\n\nIs this correct?",
             parse_mode="Markdown",
             reply_markup=kb,
         )
@@ -3588,6 +3693,9 @@ async def _set_token_now(chat_id: int, jetton: str, context: ContextTypes.DEFAUL
         "holders": holders_seed,
         "ston_pool": ston_pool,
         "dedust_pool": dedust_pool,
+        "is_blum_candidate": bool(not ston_pool and not dedust_pool),
+        "last_blum_event_id": None,
+        "last_blum_event_ts": 0,
         "set_at": int(time.time()),
         "init_done": False,
         "paused": False,
@@ -3618,7 +3726,8 @@ async def _set_token_now(chat_id: int, jetton: str, context: ContextTypes.DEFAUL
         f"• Token: *{safe_disp}*\n"
         f"• Address: `{jetton}`\n"
         f"• STON.fi pool: `{ston_pool or 'NONE'}`\n"
-        f"• DeDust pool: `{dedust_pool or 'NONE'}`\n\n"
+        f"• DeDust pool: `{dedust_pool or 'NONE'}`\n"
+        f"• Blum bonding mode: `{'ON' if (not ston_pool and not dedust_pool) else 'AUTO'}`\n\n"
         f"Now posting buys automatically for this group.\n"
         f"Use *Edit* to customize buy step, min buy, link, emoji, and media."
     )
@@ -3996,6 +4105,55 @@ async def poll_once(app: Application):
             except Exception as e:
                 log.debug("DeDust poll err chat=%s %s", chat_id, e)
 
+        # Blum bonding fallback (for tokens without STON.fi / DeDust pools yet)
+        try:
+            is_blum_candidate = bool(token.get("is_blum_candidate")) or (not token.get("ston_pool") and not token.get("dedust_pool"))
+            if is_blum_candidate and token.get("address"):
+                events = await _to_thread(tonapi_account_events, str(token.get("address")), 25)
+                if isinstance(events, list) and events:
+                    last_eid = str(token.get("last_blum_event_id") or "").strip()
+                    last_ets = int(token.get("last_blum_event_ts") or 0)
+                    # first run baseline to avoid old spam
+                    if not last_eid and not last_ets:
+                        newest = events[0]
+                        token["last_blum_event_id"] = str(newest.get("event_id") or newest.get("id") or "").strip()
+                        token["last_blum_event_ts"] = int(newest.get("timestamp") or 0)
+                    else:
+                        fresh = []
+                        for ev in events:
+                            if not isinstance(ev, dict):
+                                continue
+                            eid0 = str(ev.get("event_id") or ev.get("id") or "").strip()
+                            ts0 = int(ev.get("timestamp") or 0)
+                            if last_eid and eid0 == last_eid:
+                                break
+                            if last_ets and ts0 and ts0 <= last_ets:
+                                continue
+                            if ignore_before and ts0 and ts0 < ignore_before:
+                                continue
+                            fresh.append(ev)
+                        for ev in reversed(fresh):
+                            buys = blum_extract_buys_from_tonapi_event(ev, str(token.get("address") or ""))
+                            for buy in buys:
+                                ton_amt_v = float(buy.get("ton") or 0.0)
+                                if ton_amt_v < min_buy:
+                                    continue
+                                txh = _normalize_tx_hash_to_hex(buy.get("tx") or "")
+                                dedupe_key = ('tx:' + txh) if txh else ('blum:' + str(token.get("address")) + ':' + str(buy.get("buyer") or ''))
+                                if not dedupe_ok(chat_id, dedupe_key):
+                                    continue
+                                if settings.get("burst_mode", True) and burst["count"] >= max_msgs:
+                                    continue
+                                burst["count"] += 1
+                                await post_buy(app, chat_id, token, buy, source="Blum")
+                            eid1 = str(ev.get("event_id") or ev.get("id") or "").strip()
+                            ts1 = int(ev.get("timestamp") or 0)
+                            if eid1:
+                                token["last_blum_event_id"] = eid1
+                            if ts1:
+                                token["last_blum_event_ts"] = ts1
+        except Exception as e:
+            log.debug("Blum poll err chat=%s %s", chat_id, e)
 
 
     # save seen occasionally
@@ -4296,9 +4454,11 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
             emo = str(s.get("strength_emoji") or "🟢")
             n = 1 if ton_amt > 0 else 0
             if step > 0:
-                n = max(1, int(ton_amt // step))
-            n = min(max_n, n)
-            per_line = 15
+                # Keep the count readable on larger buys.
+                effective_step = max(step, float(ton_amt) / 9.0) if ton_amt > 0 else step
+                n = max(1, int(float(ton_amt) // effective_step))
+            n = min(max_n, max(1, n))
+            per_line = 12
             rows = []
             for i in range(0, n, per_line):
                 rows.append(repeat_emoji(emo, min(per_line, n - i)))
@@ -4364,67 +4524,81 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
     ad_line = f"ad: <a href=\"{h(ad_link)}\">{h(ad_text)}</a>" if ad_link else f"ad: {h(ad_text)}"
 
     def build_group_message() -> str:
-        """Compact original group style."""
+        """Group buy card styled like the latest requested screenshot."""
+        header_token = tok_symbol or title or "TOKEN"
+        header_inner = f'<b>{h(header_token)} Buy!</b>'
         if tg_link:
-            header_text = f'<a href="{h(tg_link)}"><b>{h(title)} Buy!</b></a>'
+            header = f'<a href="{h(tg_link)}">{header_inner}</a>'
         elif chart_link:
-            header_text = f'<a href="{h(chart_link)}"><b>{h(title)} Buy!</b></a>'
+            header = f'<a href="{h(chart_link)}">{header_inner}</a>'
         else:
-            header_text = f'<b>{h(title)} Buy!</b>'
+            header = header_inner
 
-        blocks: List[str] = [header_text]
-
-        if strength_html:
-            blocks.extend(["", str(strength_html)])
-
-        blocks.extend(["", f'Spent: <b>{ton_amt:,.2f} TON</b>{h(usd_disp)}'])
-
+        token_line = ""
         if tok_amt and tok_symbol:
+            sym_html = h(tok_symbol)
+            if tg_link:
+                sym_html = f'<a href="{h(tg_link)}">{h(tok_symbol)}</a>'
             try:
                 tok_amt_f = float(tok_amt)
-                blocks.append(f'Got: <b>{h(fmt_token_amount(tok_amt_f))} {h(tok_symbol)}</b>')
+                token_line = f'<b>Got:</b> {h(fmt_token_amount(tok_amt_f))} {sym_html}'
             except Exception:
-                blocks.append(f'Got: <b>{h(tok_amt)} {h(tok_symbol)}</b>')
+                token_line = f'<b>Got:</b> {h(tok_amt)} {sym_html}'
 
-        buyer_line = buyer_html
+        buyer_html_local = h(buyer_short)
         if buyer_url:
-            buyer_line = f'<a href="{h(buyer_url)}">{buyer_html}</a>'
-        if tx_url:
-            buyer_line = f'{buyer_line} | <a href="{h(tx_url)}">Txn</a>'
-        blocks.extend(["", buyer_line, ""])
+            buyer_html_local = f'<a href="{h(buyer_url)}">{buyer_html_local}</a>'
 
-        def _pos_or_none(v):
+        change_part = ""
+        if isinstance(change_pct, (int, float)):
+            try:
+                v = float(change_pct)
+                sign = "+" if v > 0 else ""
+                change_part = f': {sign}{v:.1f}%'
+            except Exception:
+                change_part = ""
+
+        def _price_disp(v):
             try:
                 if v is None:
-                    return None
-                fv = float(v)
-                return fv if fv > 0 else None
+                    return "—"
+                return fmt_usd(float(v), 6) or "—"
             except Exception:
-                return None
+                return "—"
 
-        price_disp = fmt_usd(_pos_or_none(price_usd), 6) or "—"
-        liq_disp = fmt_usd(_pos_or_none(liq_usd), 0) or "—"
-        mc_disp = fmt_usd(_pos_or_none(mc_usd), 0) or "—"
-        holders_disp = h(f'{int(holders):,}' if holders is not None else '—')
+        liq_val = fmt_usd(_pos_or_none(liq_usd), 0) or "—"
+        mc_val = fmt_usd(_pos_or_none(mc_usd), 0) or "—"
+        holders_text = f"{holders:,}" if isinstance(holders, int) else (str(holders) if holders is not None else "—")
+        bonding_progress = b.get("bonding_progress")
 
-        blocks.append(f'Price: {h(price_disp)}')
-        blocks.append(f'Liquidity: {h(liq_disp)}')
-        blocks.append(f'MCap: {h(mc_disp)}')
-        blocks.append(f'Holders: {holders_disp}')
+        buyer_line_local = f'{buyer_html_local}{change_part}'
 
-        link_parts = []
-        if tx_url:
-            link_parts.append(f'<a href="{h(tx_url)}">TX</a>')
-        if gt_url:
-            link_parts.append(f'<a href="{h(gt_url)}">GT</a>')
-        if dex_url:
-            link_parts.append(f'<a href="{h(dex_url)}">DexS</a>')
-        if trending:
-            link_parts.append(f'<a href="{h(trending)}">Trending</a>')
-        if link_parts:
-            blocks.append(" | ".join(link_parts))
-
-        blocks.extend(["", ad_line])
+        blocks: List[str] = [header]
+        if strength_html:
+            blocks.extend(["", strength_html])
+        blocks.extend([
+            "",
+            f'<b>Spent:</b> {ton_amt:,.2f} TON{h(usd_disp)}',
+        ])
+        if token_line:
+            blocks.append(token_line)
+        blocks.extend([
+            "",
+            buyer_line_local,
+            f'Price: {h(_price_disp(price_usd))}',
+            f'MCap: <b>{h(mc_val)}</b>',
+        ])
+        if bonding_progress is not None:
+            try:
+                blocks.append(f'Bonding Progress: <b>{float(bonding_progress):.2f}%</b>')
+            except Exception:
+                blocks.append(f'Bonding Progress: <b>{h(bonding_progress)}</b>')
+        blocks.extend([
+            "",
+            f'<a href="{h(LISTING_URL)}">Listing</a>' if LISTING_URL else 'Listing',
+            "",
+            f'Ad: <a href="{h(ad_link)}">You can book an ad here</a>' if ad_link else 'Ad: You can book an ad here',
+        ])
         return "\n".join([b for b in blocks if b is not None])
 
     def build_trending_channel_message() -> str:
@@ -4528,18 +4702,22 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
     use_image = bool(s.get("buy_image_on", False)) and bool(buy_file_id)
 
     # Buttons:
-    # - Groups: compact utility row + Buy with dTrade
-    # - Trending channel: Book Trending ONLY
+    # - Groups: Trending + DTrade
+    # - Trending channel: keep previous channel button style
     def build_buy_keyboard(dest_chat_id: int) -> InlineKeyboardMarkup:
         if is_trending_dest(int(dest_chat_id)):
             book_btn = InlineKeyboardButton("Book Trending", url=BOOK_TRENDING_URL)
             return InlineKeyboardMarkup([[book_btn]])
 
-        # Groups: one clean Buy button (text links are in message body)
-        buy_btn = InlineKeyboardButton(f"Buy {tok_symbol or title} with dTrade", url=buy_url)
-        return InlineKeyboardMarkup([[buy_btn]])
+        btn_label_symbol = (tok_symbol or title or "TOKEN").strip().upper()
+        btn_label_symbol = re.sub(r"[^A-Z0-9_]", "", btn_label_symbol) or "TOKEN"
+        if buy_url:
+            return InlineKeyboardMarkup([[InlineKeyboardButton(f"BUY ${btn_label_symbol}", url=buy_url)]])
+        return InlineKeyboardMarkup([])
 
     async def _send(dest_chat_id: int):
+        if is_trending_dest(int(dest_chat_id)) and float(ton_amt or 0.0) < float(TRENDING_MIN_BUY_TON or 0.0):
+            return
         kb = build_buy_keyboard(int(dest_chat_id))
         local_msg = build_trending_channel_message() if is_trending_dest(int(dest_chat_id)) else build_group_message()
 
@@ -4617,7 +4795,7 @@ async def tracker_loop(app: Application):
         except Exception as e:
             log.exception("tracker loop error: %s", e)
         elapsed = time.monotonic() - cycle_started
-        await asyncio.sleep(max(0.10, POLL_INTERVAL - elapsed))
+        await asyncio.sleep(max(0.05, POLL_INTERVAL - elapsed))
 
 
 
