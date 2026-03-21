@@ -1261,6 +1261,104 @@ def tonapi_account_events_subject(address: str, limit: int = 30) -> List[Dict[st
     ev = js.get("events") if isinstance(js, dict) else None
     return ev if isinstance(ev, list) else []
 
+
+def blum_extract_buys_from_tonapi_event(ev: Dict[str, Any], token_addr: str) -> List[Dict[str, Any]]:
+    """Best-effort parser for Blum bonding buys from generic TonAPI events.
+
+    Heuristic:
+    - Look for a JettonTransfer of the tracked token to a user wallet.
+    - In the same event, estimate TON spent from the same wallet's outgoing TON transfer.
+    This is intentionally permissive because Blum bonding events may not look like DEX swaps.
+    """
+    token_addr = str(token_addr or '').strip()
+    if not token_addr or not isinstance(ev, dict):
+        return []
+    actions = ev.get('actions') or []
+    if not isinstance(actions, list) or not actions:
+        return []
+
+    def _addr(x: Any) -> str:
+        if isinstance(x, dict):
+            return str(x.get('address') or x.get('account') or x.get('wallet') or x.get('id') or '').strip()
+        return str(x or '').strip()
+
+    def _to_float_amt(v: Any, decimals: int = 9) -> Optional[float]:
+        try:
+            if v is None or v == '':
+                return None
+            if isinstance(v, (int, float)):
+                vv = float(v)
+                if vv > 1e12:
+                    return vv / float(10 ** decimals)
+                return vv
+            s = str(v).strip()
+            if not s:
+                return None
+            if re.fullmatch(r'-?\d+', s):
+                iv = int(s)
+                if abs(iv) > 1_000_000_000_000:
+                    return iv / float(10 ** decimals)
+                return float(iv)
+            return float(s)
+        except Exception:
+            return None
+
+    token_decimals = 9
+    try:
+        token_decimals = int(get_jetton_meta(token_addr).get('decimals') or 9)
+    except Exception:
+        token_decimals = 9
+
+    candidates = []
+    ton_out_by_sender: Dict[str, float] = {}
+    for act in actions:
+        if not isinstance(act, dict):
+            continue
+        at = str(act.get('type') or '').lower()
+        jt = act.get('JettonTransfer') or act.get('jetton_transfer') or act.get('jettonTransfer') or {}
+        if isinstance(jt, dict):
+            jetton = jt.get('jetton') or {}
+            jetton_addr = _addr(jetton)
+            if jetton_addr == token_addr:
+                recip = _addr(jt.get('recipient') or jt.get('recipient_wallet') or jt.get('to'))
+                sender = _addr(jt.get('sender') or jt.get('sender_wallet') or jt.get('from'))
+                if recip and recip != token_addr:
+                    amt = _to_float_amt(jt.get('amount') or jt.get('jetton_amount') or jt.get('quantity'), token_decimals)
+                    if amt and amt > 0:
+                        candidates.append({'buyer': recip, 'sender': sender, 'token_amount': amt})
+        tt = act.get('TonTransfer') or act.get('ton_transfer') or act.get('tonTransfer') or {}
+        if isinstance(tt, dict):
+            sender = _addr(tt.get('sender') or tt.get('from'))
+            recip = _addr(tt.get('recipient') or tt.get('to'))
+            amt = _to_float_amt(tt.get('amount') or tt.get('value') or tt.get('ton_amount'), 9)
+            if sender and amt and amt > 0:
+                # prefer user -> bonding contract over internal movements
+                prev = ton_out_by_sender.get(sender) or 0.0
+                if amt > prev and sender != recip:
+                    ton_out_by_sender[sender] = amt
+        # some events are generic smart contract execs but still include sender/value hints
+        if at in ('smartcontractexec', 'smart_contract_exec'):
+            ex = act.get('SmartContractExec') or act.get('smart_contract_exec') or {}
+            if isinstance(ex, dict):
+                sender = _addr(ex.get('executor') or ex.get('sender') or ex.get('from'))
+                val = _to_float_amt(ex.get('value') or ex.get('amount') or ex.get('ton_attached'), 9)
+                if sender and val and val > 0:
+                    prev = ton_out_by_sender.get(sender) or 0.0
+                    if val > prev:
+                        ton_out_by_sender[sender] = val
+
+    out = []
+    txh = tonapi_event_tx_hash(ev)
+    for c in candidates:
+        buyer = c.get('buyer') or ''
+        ton_amt = ton_out_by_sender.get(buyer)
+        if ton_amt is None:
+            ton_amt = ton_out_by_sender.get(c.get('sender') or '', 0.0)
+        if ton_amt is None:
+            ton_amt = 0.0
+        out.append({'tx': txh, 'buyer': buyer, 'ton': float(ton_amt or 0.0), 'token_amount': c.get('token_amount')})
+    return out
+
 def tonapi_event_tx_hash(ev: Dict[str, Any]) -> str:
     """Best-effort extraction of a real tx hash from a TonAPI event."""
     if not isinstance(ev, dict):
@@ -2163,6 +2261,9 @@ async def addtoken_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "holders": holders_seed,
         "ston_pool": ston_pool,
         "dedust_pool": dedust_pool,
+        "is_blum_candidate": bool(not ston_pool and not dedust_pool),
+        "last_blum_event_id": None,
+        "last_blum_event_ts": 0,
         "set_at": int(time.time()),
         "init_done": True,
         "paused": False,
@@ -3308,10 +3409,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             holders = int(info.get("holders_count") or 0)
         except Exception:
             pass
+        _ston_preview = find_stonfi_ton_pair_for_token(addr)
+        _dedust_preview = find_dedust_ton_pair_for_token(addr)
+        _blum_hint = bool(not _ston_preview and not _dedust_preview)
         PENDING_TOKEN_PREVIEW[_preview_key(chat.id, user.id)] = {"address": addr, "telegram": tg_url, "name": name, "symbol": sym, "holders": holders}
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("CLICK TO CONFIRM", callback_data="CONFIRM_PREVIEW")]])
         await update.message.reply_text(
-            f"*Token Details*\nName: *{name}*\nSymbol: *{sym}*\nHolders: *{holders}*\n\nIs this correct?",
+            f"*Token Details*\nName: *{name}*\nSymbol: *{sym}*\nHolders: *{holders}*\nMode: *{'Blum bonding candidate' if _blum_hint else 'DEX pool detected'}*\n\nIs this correct?",
             parse_mode="Markdown",
             reply_markup=kb,
         )
@@ -3589,6 +3693,9 @@ async def _set_token_now(chat_id: int, jetton: str, context: ContextTypes.DEFAUL
         "holders": holders_seed,
         "ston_pool": ston_pool,
         "dedust_pool": dedust_pool,
+        "is_blum_candidate": bool(not ston_pool and not dedust_pool),
+        "last_blum_event_id": None,
+        "last_blum_event_ts": 0,
         "set_at": int(time.time()),
         "init_done": False,
         "paused": False,
@@ -3619,7 +3726,8 @@ async def _set_token_now(chat_id: int, jetton: str, context: ContextTypes.DEFAUL
         f"• Token: *{safe_disp}*\n"
         f"• Address: `{jetton}`\n"
         f"• STON.fi pool: `{ston_pool or 'NONE'}`\n"
-        f"• DeDust pool: `{dedust_pool or 'NONE'}`\n\n"
+        f"• DeDust pool: `{dedust_pool or 'NONE'}`\n"
+        f"• Blum bonding mode: `{'ON' if (not ston_pool and not dedust_pool) else 'AUTO'}`\n\n"
         f"Now posting buys automatically for this group.\n"
         f"Use *Edit* to customize buy step, min buy, link, emoji, and media."
     )
@@ -3997,6 +4105,55 @@ async def poll_once(app: Application):
             except Exception as e:
                 log.debug("DeDust poll err chat=%s %s", chat_id, e)
 
+        # Blum bonding fallback (for tokens without STON.fi / DeDust pools yet)
+        try:
+            is_blum_candidate = bool(token.get("is_blum_candidate")) or (not token.get("ston_pool") and not token.get("dedust_pool"))
+            if is_blum_candidate and token.get("address"):
+                events = await _to_thread(tonapi_account_events, str(token.get("address")), 25)
+                if isinstance(events, list) and events:
+                    last_eid = str(token.get("last_blum_event_id") or "").strip()
+                    last_ets = int(token.get("last_blum_event_ts") or 0)
+                    # first run baseline to avoid old spam
+                    if not last_eid and not last_ets:
+                        newest = events[0]
+                        token["last_blum_event_id"] = str(newest.get("event_id") or newest.get("id") or "").strip()
+                        token["last_blum_event_ts"] = int(newest.get("timestamp") or 0)
+                    else:
+                        fresh = []
+                        for ev in events:
+                            if not isinstance(ev, dict):
+                                continue
+                            eid0 = str(ev.get("event_id") or ev.get("id") or "").strip()
+                            ts0 = int(ev.get("timestamp") or 0)
+                            if last_eid and eid0 == last_eid:
+                                break
+                            if last_ets and ts0 and ts0 <= last_ets:
+                                continue
+                            if ignore_before and ts0 and ts0 < ignore_before:
+                                continue
+                            fresh.append(ev)
+                        for ev in reversed(fresh):
+                            buys = blum_extract_buys_from_tonapi_event(ev, str(token.get("address") or ""))
+                            for buy in buys:
+                                ton_amt_v = float(buy.get("ton") or 0.0)
+                                if ton_amt_v < min_buy:
+                                    continue
+                                txh = _normalize_tx_hash_to_hex(buy.get("tx") or "")
+                                dedupe_key = ('tx:' + txh) if txh else ('blum:' + str(token.get("address")) + ':' + str(buy.get("buyer") or ''))
+                                if not dedupe_ok(chat_id, dedupe_key):
+                                    continue
+                                if settings.get("burst_mode", True) and burst["count"] >= max_msgs:
+                                    continue
+                                burst["count"] += 1
+                                await post_buy(app, chat_id, token, buy, source="Blum")
+                            eid1 = str(ev.get("event_id") or ev.get("id") or "").strip()
+                            ts1 = int(ev.get("timestamp") or 0)
+                            if eid1:
+                                token["last_blum_event_id"] = eid1
+                            if ts1:
+                                token["last_blum_event_ts"] = ts1
+        except Exception as e:
+            log.debug("Blum poll err chat=%s %s", chat_id, e)
 
 
     # save seen occasionally
@@ -4412,14 +4569,7 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
         liq_val = fmt_usd(_pos_or_none(liq_usd), 0) or "—"
         mc_val = fmt_usd(_pos_or_none(mc_usd), 0) or "—"
         holders_text = f"{holders:,}" if isinstance(holders, int) else (str(holders) if holders is not None else "—")
-
-        gt_link_local = gt_url or (gecko_terminal_pool_url(pair_for_links) if pair_for_links else "")
-        tx_part_local = f'<a href="{h(tx_url)}">TX</a>' if tx_url else 'TX'
-        gt_part_local = f'<a href="{h(gt_link_local)}">GT</a>' if gt_link_local else 'GT'
-        dexs_part_local = f'<a href="{h(dex_url)}">DexS</a>' if dex_url else 'DexS'
-        telegram_part_local = f'<a href="{h(tg_link)}">Telegram</a>' if tg_link else 'Telegram'
-        trending_part_local = f'<a href="{h(trending)}">Trending</a>' if trending else 'Trending'
-        links_row_local = " | ".join([tx_part_local, gt_part_local, dexs_part_local, telegram_part_local, trending_part_local])
+        bonding_progress = b.get("bonding_progress")
 
         buyer_line_local = f'{buyer_html_local}{change_part}'
 
@@ -4436,11 +4586,16 @@ async def post_buy(app: Application, chat_id: int, token: Dict[str, Any], b: Dic
             "",
             buyer_line_local,
             f'Price: {h(_price_disp(price_usd))}',
-            f'Liquidity: {h(liq_val)}',
             f'MCap: <b>{h(mc_val)}</b>',
-            f'Holders: <b>{h(holders_text)}</b>',
+        ])
+        if bonding_progress is not None:
+            try:
+                blocks.append(f'Bonding Progress: <b>{float(bonding_progress):.2f}%</b>')
+            except Exception:
+                blocks.append(f'Bonding Progress: <b>{h(bonding_progress)}</b>')
+        blocks.extend([
             "",
-            links_row_local,
+            f'<a href="{h(LISTING_URL)}">Listing</a>' if LISTING_URL else 'Listing',
             "",
             f'Ad: <a href="{h(ad_link)}">You can book an ad here</a>' if ad_link else 'Ad: You can book an ad here',
         ])
