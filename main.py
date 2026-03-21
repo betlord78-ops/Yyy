@@ -1071,17 +1071,26 @@ async def warmup_seen_for_chat(chat_id: int, ston_pool: str|None, dedust_pool: s
                 newest_dedust = str(max_lt_i)
             newest_dedust_ts = max_ts_i
 
-        # Blum bonding (warmup by latest tx hash on jetton contract)
+        # Blum bonding warmup: prefer /events baseline, fall back to raw tx hash.
         if blum_jetton:
             try:
-                txs = await _to_thread(tonapi_account_transactions, blum_jetton, 20)
-                if isinstance(txs, list) and txs:
-                    newest = txs[0]
-                    newest_blum_tx = str(_tx_hash(newest) or "").strip()
+                evs_b = await _to_thread(tonapi_account_events, blum_jetton, 30)
+                if isinstance(evs_b, list) and evs_b:
+                    newest_ev = evs_b[0]
+                    newest_blum_tx = str(newest_ev.get("event_id") or newest_ev.get("id") or tonapi_event_tx_hash(newest_ev) or "").strip()
                     try:
-                        newest_blum_ts = int(newest.get("utime") or 0)
+                        newest_blum_ts = int(newest_ev.get("timestamp") or 0)
                     except Exception:
                         newest_blum_ts = None
+                if not newest_blum_tx:
+                    txs = await _to_thread(tonapi_account_transactions, blum_jetton, 20)
+                    if isinstance(txs, list) and txs:
+                        newest = txs[0]
+                        newest_blum_tx = str(_tx_hash(newest) or "").strip()
+                        try:
+                            newest_blum_ts = int(newest.get("utime") or 0)
+                        except Exception:
+                            newest_blum_ts = None
             except Exception:
                 pass
 
@@ -1510,6 +1519,133 @@ def blum_extract_buys_from_tonapi_tx(tx: Dict[str, Any], token_addr: str) -> Lis
     for b in out:
         key = (b.get("tx"), b.get("buyer"))
         dedup[key] = b
+    return list(dedup.values())
+
+def blum_buys_from_tonapi_event(ev: Dict[str, Any], token_addr: str) -> List[Dict[str, Any]]:
+    """Extract probable Blum bonding buys from TonAPI account events.
+
+    Why this exists:
+    - Some Blum buys are easier to see in /events than raw /transactions.
+    - Public providers may omit swap-like decoded actions from transaction payloads.
+
+    Strategy (best-effort):
+    1) Find JettonTransfer of the tracked token to a user => buyer + token amount.
+    2) Find TON spent by the same buyer somewhere in the same event, preferring
+       explicit TonTransfer and falling back to SmartContractExec.ton_attached.
+    """
+    if not isinstance(ev, dict):
+        return []
+    token_addr = str(token_addr or '').strip()
+    if not token_addr:
+        return []
+
+    actions = ev.get('actions') or []
+    if not isinstance(actions, list):
+        return []
+
+    event_tx = tonapi_event_tx_hash(ev) or str(ev.get('event_id') or ev.get('id') or '').strip()
+
+    def _addr(x: Any) -> str:
+        if isinstance(x, dict):
+            return str(x.get('address') or x.get('account') or x.get('owner') or x.get('wallet') or '').strip()
+        return str(x or '').strip()
+
+    candidates: List[Tuple[str, float]] = []
+    for a in actions:
+        if not isinstance(a, dict) or a.get('type') != 'JettonTransfer':
+            continue
+        jt = a.get('JettonTransfer')
+        if not isinstance(jt, dict):
+            continue
+        jetton = jt.get('jetton') or {}
+        jaddr = _addr(jetton)
+        if isinstance(jetton, dict):
+            jaddr = str(jetton.get('address') or jetton.get('master') or jetton.get('jetton_master') or jetton.get('jettonMaster') or '').strip()
+        if jaddr != token_addr:
+            continue
+        buyer = _addr(jt.get('recipient'))
+        sender = _addr(jt.get('sender'))
+        if not buyer or buyer == token_addr or buyer == sender:
+            continue
+        dec = 9
+        try:
+            if isinstance(jetton, dict) and jetton.get('decimals') is not None:
+                dec = int(jetton.get('decimals') or 9)
+            else:
+                dec = int(get_jetton_meta(token_addr).get('decimals') or 9)
+        except Exception:
+            dec = 9
+        raw_amt = jt.get('amount')
+        try:
+            tok_amt = float(raw_amt)
+            if str(raw_amt).strip().isdigit() and tok_amt > 1e5:
+                tok_amt /= (10 ** max(dec, 0))
+        except Exception:
+            tok_amt = 0.0
+        if tok_amt > 0:
+            candidates.append((buyer, tok_amt))
+
+    if not candidates:
+        return []
+
+    ton_spent_by: Dict[str, float] = {}
+    outgoing_by: Dict[str, float] = {}
+    for a in actions:
+        if not isinstance(a, dict) or a.get('type') not in ('TonTransfer', 'TONTransfer', 'Transfer'):
+            continue
+        tt = a.get('TonTransfer') or a.get('TONTransfer') or a.get('Transfer')
+        if not isinstance(tt, dict):
+            continue
+        sender = _addr(tt.get('sender'))
+        recip = _addr(tt.get('recipient'))
+        if not sender or sender == recip:
+            continue
+        amt = tt.get('amount')
+        try:
+            ton_amt = float(amt)
+            if str(amt).strip().isdigit() and ton_amt > 1e5:
+                ton_amt /= 1e9
+        except Exception:
+            ton_amt = 0.0
+        if ton_amt <= 0:
+            continue
+        outgoing_by[sender] = max(outgoing_by.get(sender, 0.0), ton_amt)
+        ton_spent_by[sender] = max(ton_spent_by.get(sender, 0.0), ton_amt)
+        if recip:
+            # Some payloads show the user as recipient and the actual TON spend under sender.
+            outgoing_by[recip] = max(outgoing_by.get(recip, 0.0), 0.0)
+
+    if not ton_spent_by:
+        for a in actions:
+            if not isinstance(a, dict) or a.get('type') != 'SmartContractExec':
+                continue
+            sc = a.get('SmartContractExec')
+            if not isinstance(sc, dict):
+                continue
+            executor = _addr(sc.get('executor'))
+            if not executor:
+                continue
+            try:
+                ton_attached = float(sc.get('ton_attached') or 0.0)
+                if str(sc.get('ton_attached') or '').strip().isdigit() and ton_attached > 1e5:
+                    ton_attached /= 1e9
+            except Exception:
+                ton_attached = 0.0
+            if ton_attached > 0:
+                ton_spent_by[executor] = max(ton_spent_by.get(executor, 0.0), ton_attached)
+
+    out: List[Dict[str, Any]] = []
+    for buyer, tok_amt in candidates:
+        ton_amt = ton_spent_by.get(buyer, 0.0) or outgoing_by.get(buyer, 0.0)
+        if ton_amt > 0 and tok_amt > 0:
+            out.append({'tx': event_tx, 'buyer': buyer, 'ton': ton_amt, 'token_amount': tok_amt})
+
+    dedup: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for b in out:
+        key = (str(b.get('tx') or ''), str(b.get('buyer') or ''))
+        prev = dedup.get(key)
+        if prev is None or float(b.get('ton') or 0.0) >= float(prev.get('ton') or 0.0):
+            dedup[key] = b
     return list(dedup.values())
 
 def tonapi_event_tx_hash(ev: Dict[str, Any]) -> str:
@@ -2414,8 +2550,8 @@ async def addtoken_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "holders": holders_seed,
         "ston_pool": ston_pool,
         "dedust_pool": dedust_pool,
-        "blum_mode": bool(blum_mode),
-        "blum_active": bool(blum_mode and not ston_pool),
+        "blum_mode": bool(blum_mode or (not ston_pool and not dedust_pool)),
+        "blum_active": bool((blum_mode or (not ston_pool and not dedust_pool)) and not ston_pool),
         "blum_progress_pct": (blum_info.get("progress_pct") if isinstance(blum_info, dict) else None),
         "blum_reserve_ton": (blum_info.get("reserve_ton") if isinstance(blum_info, dict) else None),
         "blum_cap_ton": (blum_info.get("cap_ton") if isinstance(blum_info, dict) else 1500.0),
@@ -2437,7 +2573,7 @@ async def addtoken_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Warmup seen in the TRENDING channel so old swaps aren't spammed
     if TRENDING_POST_CHAT_ID:
         try:
-            await warmup_seen_for_chat(int(TRENDING_POST_CHAT_ID), ston_pool, dedust_pool, jetton if blum_mode else None)
+            await warmup_seen_for_chat(int(TRENDING_POST_CHAT_ID), ston_pool, dedust_pool, jetton if (blum_mode or (not ston_pool and not dedust_pool)) else None)
         except Exception:
             pass
 
@@ -3843,7 +3979,7 @@ async def _set_token_now(chat_id: int, jetton: str, context: ContextTypes.DEFAUL
         else:
             s["enable_dedust"] = bool(dedust_pool)
             s["enable_ston"] = bool(ston_pool)
-        s["enable_blum"] = bool(blum_mode)
+        s["enable_blum"] = bool(blum_mode or (not ston_pool and not dedust_pool))
         g["settings"] = s
     except Exception:
         pass
@@ -3857,8 +3993,8 @@ async def _set_token_now(chat_id: int, jetton: str, context: ContextTypes.DEFAUL
         "holders": holders_seed,
         "ston_pool": ston_pool,
         "dedust_pool": dedust_pool,
-        "blum_mode": bool(blum_mode),
-        "blum_active": bool(blum_mode and not ston_pool),
+        "blum_mode": bool(blum_mode or (not ston_pool and not dedust_pool)),
+        "blum_active": bool((blum_mode or (not ston_pool and not dedust_pool)) and not ston_pool),
         "blum_progress_pct": (blum_info.get("progress_pct") if isinstance(blum_info, dict) else None),
         "blum_reserve_ton": (blum_info.get("reserve_ton") if isinstance(blum_info, dict) else None),
         "blum_cap_ton": (blum_info.get("cap_ton") if isinstance(blum_info, dict) else 1500.0),
@@ -3877,7 +4013,7 @@ async def _set_token_now(chat_id: int, jetton: str, context: ContextTypes.DEFAUL
     save_groups()
 
     # Prevent posting old buys right after configuration
-    await warmup_seen_for_chat(chat_id, ston_pool, dedust_pool, jetton if blum_mode else None)
+    await warmup_seen_for_chat(chat_id, ston_pool, dedust_pool, jetton if (blum_mode or (not ston_pool and not dedust_pool)) else None)
     # Mark init done so tracker loop doesn't skip another full cycle
     try:
         g2 = get_group(chat_id)
@@ -4096,6 +4232,9 @@ async def poll_once(app: Application):
                     if info_b.get("cap_ton") is not None:
                         token["blum_cap_ton"] = float(info_b.get("cap_ton"))
 
+                events_b = await _to_thread(tonapi_account_events, jetton, 40)
+                if not isinstance(events_b, list):
+                    events_b = []
                 txs = await _to_thread(tonapi_account_transactions, jetton, 20)
                 if not isinstance(txs, list):
                     txs = []
@@ -4107,7 +4246,15 @@ async def poll_once(app: Application):
                 ignore_before = int(token.get("ignore_before_ts") or 0)
 
                 # First run baseline
-                if not last_tx and txs:
+                if not last_tx and events_b:
+                    newest_ev = events_b[0]
+                    token["last_blum_tx"] = str(newest_ev.get("event_id") or newest_ev.get("id") or tonapi_event_tx_hash(newest_ev) or "").strip()
+                    try:
+                        token["last_blum_ts"] = int(newest_ev.get("timestamp") or 0)
+                    except Exception:
+                        pass
+                    save_groups()
+                elif not last_tx and txs:
                     token["last_blum_tx"] = str(_tx_hash(txs[0]) or "").strip()
                     try:
                         token["last_blum_ts"] = int(txs[0].get("utime") or 0)
@@ -4115,27 +4262,28 @@ async def poll_once(app: Application):
                         pass
                     save_groups()
                 else:
-                    new_txs = []
-                    for txo in txs:
-                        txh0 = str(_tx_hash(txo) or "").strip()
-                        uts = int(txo.get("utime") or 0)
-                        if last_tx and txh0 == last_tx:
+                    new_events = []
+                    for evo in events_b:
+                        eidh = str(evo.get("event_id") or evo.get("id") or tonapi_event_tx_hash(evo) or "").strip()
+                        uts = int(evo.get("timestamp") or 0)
+                        if last_tx and eidh == last_tx:
                             break
                         if last_ts and uts and uts <= last_ts:
                             continue
                         if ignore_before and uts and uts < ignore_before:
                             continue
-                        new_txs.append(txo)
+                        new_events.append(evo)
 
                     max_ts_seen = last_ts
                     newest_seen_tx = last_tx
-                    for txo in reversed(new_txs):
-                        buys = blum_extract_buys_from_tonapi_tx(txo, jetton)
+                    posted_from_events = False
+                    for evo in reversed(new_events):
+                        buys = blum_buys_from_tonapi_event(evo, jetton)
                         for b in buys:
                             ton_spent = float(b.get("ton") or 0.0)
                             if ton_spent < min_buy:
                                 continue
-                            txh = str(b.get("tx") or _tx_hash(txo) or "").strip()
+                            txh = str(b.get("tx") or tonapi_event_tx_hash(evo) or "").strip()
                             dedupe_key = f"blum:{jetton}:{txh}:{b.get('buyer') or ''}"
                             if not dedupe_ok(chat_id, dedupe_key):
                                 continue
@@ -4148,15 +4296,59 @@ async def poll_once(app: Application):
                                 "ton": ton_spent,
                                 "token_amount": float(b.get("token_amount") or 0.0),
                             }, source="Blum")
+                            posted_from_events = True
                         try:
-                            uts = int(txo.get("utime") or 0)
+                            uts = int(evo.get("timestamp") or 0)
                         except Exception:
                             uts = 0
-                        txh1 = str(_tx_hash(txo) or "").strip()
-                        if txh1:
-                            newest_seen_tx = txh1
+                        eidh = str(evo.get("event_id") or evo.get("id") or tonapi_event_tx_hash(evo) or "").strip()
+                        if eidh:
+                            newest_seen_tx = eidh
                         if uts and uts > max_ts_seen:
                             max_ts_seen = uts
+
+                    # Fallback to raw transactions when /events misses decoded legs.
+                    if not posted_from_events:
+                        new_txs = []
+                        for txo in txs:
+                            txh0 = str(_tx_hash(txo) or "").strip()
+                            uts = int(txo.get("utime") or 0)
+                            if last_tx and txh0 == last_tx:
+                                break
+                            if last_ts and uts and uts <= last_ts:
+                                continue
+                            if ignore_before and uts and uts < ignore_before:
+                                continue
+                            new_txs.append(txo)
+
+                        for txo in reversed(new_txs):
+                            buys = blum_extract_buys_from_tonapi_tx(txo, jetton)
+                            for b in buys:
+                                ton_spent = float(b.get("ton") or 0.0)
+                                if ton_spent < min_buy:
+                                    continue
+                                txh = str(b.get("tx") or _tx_hash(txo) or "").strip()
+                                dedupe_key = f"blum:{jetton}:{txh}:{b.get('buyer') or ''}"
+                                if not dedupe_ok(chat_id, dedupe_key):
+                                    continue
+                                if settings.get("burst_mode", True) and burst["count"] >= max_msgs:
+                                    continue
+                                burst["count"] += 1
+                                await post_buy(app, chat_id, token, {
+                                    "tx": txh,
+                                    "buyer": b.get("buyer"),
+                                    "ton": ton_spent,
+                                    "token_amount": float(b.get("token_amount") or 0.0),
+                                }, source="Blum")
+                            try:
+                                uts = int(txo.get("utime") or 0)
+                            except Exception:
+                                uts = 0
+                            txh1 = str(_tx_hash(txo) or "").strip()
+                            if txh1:
+                                newest_seen_tx = txh1
+                            if uts and uts > max_ts_seen:
+                                max_ts_seen = uts
                     if newest_seen_tx:
                         token["last_blum_tx"] = newest_seen_tx
                     if max_ts_seen:
